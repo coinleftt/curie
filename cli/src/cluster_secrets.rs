@@ -128,6 +128,33 @@ pub fn bind_commands(opts: &BindOpts) -> Result<Vec<OpsCommand>> {
     ])
 }
 
+/// Remove the agent's binding from the release, then replace its claimed
+/// sandboxes (#3021). Helm's `key=null` deletes the map entry on
+/// `--reuse-values`, so the upgrade stops rendering the per-agent Secret and
+/// SandboxTemplate and prunes both; retiring the claims afterwards means no
+/// running pod keeps the removed credential in its env. The agent name is
+/// validated, so the `--set` path carries no value and no user-controlled
+/// separator.
+pub fn clear_commands(common: &CommonOpts, chart: &str, agent: &str) -> Result<Vec<OpsCommand>> {
+    validate_agent_resource_name(agent)?;
+    Ok(vec![
+        OpsCommand::new(
+            "helm",
+            vec![
+                plain("upgrade"),
+                plain(&common.release),
+                plain(chart),
+                plain("-n"),
+                plain(&common.namespace),
+                plain("--reuse-values"),
+                plain("--set"),
+                plain(format!("agentSandbox.connectorSecrets.{agent}=null")),
+            ],
+        ),
+        retire_claims_command(&common.namespace, agent),
+    ])
+}
+
 /// Replace the agent's claimed sandboxes so the next turn starts a fresh pod
 /// with the newly deployed bundle and re-resolved secretKeyRef env.
 fn retire_claims_command(namespace: &str, agent: &str) -> OpsCommand {
@@ -156,6 +183,10 @@ pub enum BindNeed {
     /// These names are missing or hold a different value. Names only, never
     /// values.
     Changed(Vec<String>),
+    /// The redeploy carries no connector secret for this agent but the release
+    /// still binds some (#3021). Leaving them would keep a removed credential
+    /// reachable by the agent's runner pods, so the binding is cleared.
+    Clear,
 }
 
 /// Pure over the JSON `helm get values -o json` returns for the release.
@@ -170,6 +201,16 @@ pub fn bind_need(
     let bound = release_values
         .pointer("/agentSandbox/connectorSecrets")
         .and_then(|all| all.get(agent));
+    if secrets.is_empty() {
+        let still_bound = bound
+            .and_then(|b| b.as_object())
+            .is_some_and(|b| !b.is_empty());
+        return if still_bound {
+            BindNeed::Clear
+        } else {
+            BindNeed::Current
+        };
+    }
     let changed: Vec<String> = secrets
         .iter()
         .filter(|(name, value)| {
@@ -212,9 +253,6 @@ pub async fn read_bind_need(
     secrets: &BTreeMap<String, String>,
 ) -> Result<BindNeed> {
     validate_agent_resource_name(agent)?;
-    if secrets.is_empty() {
-        return Ok(BindNeed::Current);
-    }
     require_on_path("helm")?;
     let (ok, stdout, _stderr) = crate::ops::run_capture(&helm_values_command(common)).await?;
     let parsed = if ok {
@@ -224,6 +262,9 @@ pub async fn read_bind_need(
     };
     Ok(match parsed {
         Some(values) => bind_need(&values, agent, secrets),
+        // With nothing to bind, an unreadable release cannot prove a stale
+        // binding exists, so it is left alone exactly as before #3021.
+        None if secrets.is_empty() => BindNeed::Current,
         None => BindNeed::Changed(secrets.keys().cloned().collect()),
     })
 }
@@ -283,6 +324,23 @@ where
                 secrets,
             })
             .await?;
+        }
+        BindNeed::Clear => {
+            ui.note(&format!(
+                "platform change required: agent {agent} no longer declares any connector \
+                 secret, so release {} is being helm-upgraded to remove its binding",
+                common.release
+            ));
+            let chart = chart.await?;
+            require_on_path("kubectl")?;
+            let cl = ui.checklist();
+            let label = format!(
+                "clearing connector secrets for agent {agent} on release {}",
+                common.release
+            );
+            for cmd in &clear_commands(&common, &chart, &agent)? {
+                run_step(&cl, &label, "cleared", cmd).await?;
+            }
         }
     }
     Ok(need)
@@ -603,14 +661,21 @@ esac
         .await
         .unwrap();
         assert_eq!(need, BindNeed::Clear);
-        assert_eq!(helm.revision(), 8, "the stale binding was left in the release");
+        assert_eq!(
+            helm.revision(),
+            8,
+            "the stale binding was left in the release"
+        );
         let upgrade = std::fs::read_to_string(helm.dir.path().join("helm.log")).unwrap();
         assert!(upgrade.contains("--reuse-values"), "{upgrade}");
         assert!(
             upgrade.contains("agentSandbox.connectorSecrets.acme-a=null"),
             "the agent's binding must be removed from the values: {upgrade}"
         );
-        assert!(!upgrade.contains("acme-b"), "another agent was touched: {upgrade}");
+        assert!(
+            !upgrade.contains("acme-b"),
+            "another agent was touched: {upgrade}"
+        );
         let kubectl = std::fs::read_to_string(helm.dir.path().join("kubectl.log")).unwrap();
         assert!(
             kubectl.contains("delete sandboxclaim") && kubectl.contains("=acme-a"),
