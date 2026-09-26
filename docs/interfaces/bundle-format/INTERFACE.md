@@ -95,7 +95,8 @@ files**, each absent from a bundle that needs none, all three invisible to Claud
   the placeholder at boot and then drop the name from the process env (#2503, #2559). The `url`
   fallback used by tiers below cluster derives no header and remains a follow-up. A hosted
   connector with several
-  secrets and no `bearer_secret` is `connectors.bearer_secret_required`. Validated by `packages/plugin-format/src/plugin_format/validate.py::_validate_connectors`,
+  secrets, any of them a plain string, and no `bearer_secret` is `connectors.bearer_secret_required`;
+  one whose secrets are all `SecretRef`s is valid and derives no header (#3057). Validated by `packages/plugin-format/src/plugin_format/validate.py::_validate_connectors`,
   which emits `connectors.*` codes (`connectors.not_object`, `connectors.ambiguous`,
   `connectors.underspecified`, `connectors.reserved_name`, `connectors.duplicate_connector`,
   `connectors.duplicate_server`, `connectors.build_context_escapes`,
