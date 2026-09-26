@@ -77,6 +77,32 @@ placement:
     affinity: {}
 
 # ---------------------------------------------------------------------------
+# End to end connector identity (ADR 0176 decision 4, issue #3243)
+#
+# Install this ONLY on the release that owns a separate TEST cluster (ADR 0129
+# owner release), never on the cluster that runs the factory. Enable it with
+# `curie cluster up --e2e-connector-identity`.
+#
+# It renders a service account that may create and delete only namespaces whose
+# name starts with `namespacePrefix` and that carry `ownerLabel`, may read and
+# write only inside such namespaces, and holds no cluster scoped write. A
+# ValidatingAdmissionPolicy enforces the prefix and label at the API server,
+# so it needs admissionregistration.k8s.io/v1 (Kubernetes 1.30 or newer). The
+# template header in templates/e2e-connector-identity.yaml explains the grant.
+# ---------------------------------------------------------------------------
+e2eConnectorIdentity:
+  enabled: false
+  # Defaults to <fullname>-e2e-connector.
+  serviceAccountName: ""
+  # Lowercase DNS label ending in "-". Every namespace the identity creates
+  # must start with it.
+  namespacePrefix: "curie-e2e-"
+  ownerLabel:
+    key: "curietech.ai/e2e-owner"
+    # Defaults to the release name.
+    value: ""
+
+# ---------------------------------------------------------------------------
 # PriorityClass (ADR-0059 decision 5): ranks the platform -- worker, api,
 # dispatcher, the data tier (postgres, valkey, clickhouse, rustfs), and the
 # observability and UI tier (langfuse web/worker, the OTel collector, the UI,

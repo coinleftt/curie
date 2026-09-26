@@ -488,6 +488,16 @@ jobs:
           set -euo pipefail
           bash charts/curie/ci/connector-reconciler-rbac-assertions.sh
 
+      # Pin the end to end connector's test cluster identity (ADR 0176
+      # decision 4, #3243): off by default, no cluster scoped write beyond
+      # namespace create and delete, the per namespace role never bound cluster
+      # wide, and an admission policy that fails closed on this identity alone.
+      # The live denials are proven by ci/runtime/e2e-connector-identity-runtime.sh.
+      - name: helm render assertions (e2e connector identity)
+        run: |
+          set -euo pipefail
+          bash charts/curie/ci/e2e-connector-identity-assertions.sh
+
       - name: helm render assertions (remote dev capability)
         run: |
           set -euo pipefail
