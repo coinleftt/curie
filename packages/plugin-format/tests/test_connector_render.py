@@ -1679,3 +1679,47 @@ def test_derived_bearer_header_matches_the_frozen_vector(vector: dict) -> None:
         assert authorization is None, vector["name"]
     else:
         assert authorization == f"Bearer ${{{expected}}}", vector["name"]
+
+
+# -- readiness (#3058) --------------------------------------------------------
+
+
+def _server(spec: ConnectorSpec) -> dict:
+    (dep,) = [o for o in _objs(spec=spec) if o["kind"] == "Deployment"]
+    (container,) = dep["spec"]["template"]["spec"]["containers"]
+    return container
+
+
+def test_connector_gets_a_tcp_readiness_probe_on_its_own_port() -> None:
+    # A server that never binds (the `sleep infinity` break test) stayed
+    # 1/1 Available because Ready meant only "the process started".
+    container = _server(HOSTED)
+    probe = container["readinessProbe"]
+    assert probe["tcpSocket"] == {"port": "http"}
+    assert "httpGet" not in probe
+    # "http" must name the port the server actually listens on.
+    assert {"name": "http", "containerPort": HOSTED.port} in container["ports"]
+    moved = _server(HOSTED.model_copy(update={"port": 9100}))
+    assert moved["readinessProbe"]["tcpSocket"] == {"port": "http"}
+    assert {"name": "http", "containerPort": 9100} in moved["ports"]
+
+
+def test_connector_never_gets_a_liveness_or_startup_probe() -> None:
+    # A slow upstream must leave the Service, not be restarted in a loop.
+    for spec in (HOSTED, HOSTED.model_copy(update={"port": 9100})):
+        container = _server(spec)
+        assert "livenessProbe" not in container
+        assert "startupProbe" not in container
+
+
+def test_every_shipped_sre_bot_connector_renders_a_readiness_probe() -> None:
+    root = Path(__file__).resolve().parents[3]
+    data = yaml.safe_load((root / "examples" / "sre-bot" / "connectors.yaml").read_text())
+    parsed, errors = validate_connectors(data)
+    assert errors == [] and parsed is not None
+    hosted = {n: s for n, s in parsed.connectors.items() if s.is_hosted}
+    assert {"kubernetes", "grafana", "tempo"} <= set(hosted)
+    for name, spec in hosted.items():
+        dep = r.render_deployment("curie", "sre-bot", "curie", name, spec, "s")
+        (container,) = dep["spec"]["template"]["spec"]["containers"]
+        assert "readinessProbe" in container, name
