@@ -14,7 +14,10 @@
 #   (d) The worker role is referenced by no ClusterRoleBinding (only by the
 #       RoleBindings the connector creates inside its own namespaces).
 #   (e) The admission policy fails closed, denies, matches this service account
-#       alone, and carries the configured prefix and label.
+#       and the service accounts inside its prefixed namespaces, requires a
+#       Pod Security level on every namespace it creates, confines RoleBinding
+#       subjects to the binding's namespace, and carries the configured prefix
+#       and label.
 #   (f) An invalid prefix is refused at render time rather than producing a
 #       policy that admits the wrong names.
 set -euo pipefail
@@ -104,13 +107,18 @@ if bindings[0]["spec"]["validationActions"] != ["Deny"]:
 if bindings[0]["spec"]["policyName"] != policies[0]["metadata"]["name"]:
     fail("e", "binding names another policy")
 match = [c["expression"] for c in spec["matchConditions"]]
-if match != [f"request.userInfo.username == 'system:serviceaccount:curie-e2e-identity-assert:{sa}'"]:
+if match != [f"request.userInfo.username == 'system:serviceaccount:curie-e2e-identity-assert:{sa}' || request.userInfo.username.startsWith('system:serviceaccount:probe-ns-')"]:
     fail("e", f"policy matches {match}")
 ops = spec["matchConstraints"]["resourceRules"][0]["operations"]
 if set(ops) != {"CREATE", "UPDATE", "DELETE", "CONNECT"}:
     fail("e", f"policy covers operations {ops}")
 text = " ".join(v["expression"] for v in spec["validations"])
-for needle in ("startsWith('probe-ns-')", "['curietech.ai/e2e-owner'] == 'probe-owner'"):
+for needle in (
+    "startsWith('probe-ns-')",
+    "['curietech.ai/e2e-owner'] == 'probe-owner'",
+    "['pod-security.kubernetes.io/enforce'] in ['baseline', 'restricted']",
+    "object.subjects.all(s, s.kind == 'ServiceAccount'",
+):
     if needle not in text:
         fail("e", f"policy lacks {needle}")
 print("ok: e2e connector identity grant")

@@ -1292,13 +1292,18 @@ What it grants, and how the cluster enforces it:
 - The `-namespace` ClusterRole is bound only by a RoleBinding the connector
   creates inside a namespace it created. That RoleBinding is its only source of
   namespaced reads and writes, so every other namespace is unreadable to it.
-- A ValidatingAdmissionPolicy matched to that service account alone, failing
-  closed. It admits a namespace create or delete only when the name starts with
-  `e2eConnectorIdentity.namespacePrefix` (default `curie-e2e-`) and the namespace
-  carries `e2eConnectorIdentity.ownerLabel` (default
-  `curietech.ai/e2e-owner=<release>`); admits a namespaced write only inside
-  such a namespace; denies every other cluster scoped write; and refuses a
-  RoleBinding that hands the `-namespace` role to any other subject.
+- A ValidatingAdmissionPolicy, failing closed, matched to that service account
+  and to every service account inside a prefixed namespace, so a token the
+  identity mints there is held to the same rules. It admits a namespace create
+  only when the name starts with `e2eConnectorIdentity.namespacePrefix` (default
+  `curie-e2e-`), the namespace carries `e2eConnectorIdentity.ownerLabel`
+  (default `curietech.ai/e2e-owner=<release>`), and it sets
+  `pod-security.kubernetes.io/enforce` to `baseline` or `restricted`, so no pod
+  there may be privileged, share host namespaces or mount a host path. It
+  admits a namespace delete only for a prefixed, labelled namespace; admits a
+  namespaced write only inside one; denies every other cluster scoped write;
+  and refuses a RoleBinding naming anything but a service account of its own
+  namespace, so no grant reaches a user, a group or another namespace.
 
 A namespace an administrator creates with the prefix and label is inside the
 identity's scope by definition: the label is the ownership claim. Only the
