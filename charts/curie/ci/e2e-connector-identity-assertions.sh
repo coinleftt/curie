@@ -18,8 +18,8 @@
 #       Pod Security level on every namespace it creates, confines RoleBinding
 #       subjects to the binding's namespace, and carries the configured prefix
 #       and label.
-#   (f) An invalid prefix is refused at render time rather than producing a
-#       policy that admits the wrong names.
+#   (f) An invalid prefix, or one covering kube-system or the release's own
+#       namespace, is refused at render time.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -129,5 +129,13 @@ if render --set e2eConnectorIdentity.enabled=true \
   -s templates/e2e-connector-identity.yaml >/dev/null 2>&1; then
   fail f "an unsafe prefix rendered"
 fi
+
+for bad in kube- "${NS%-*}-"; do
+  if render --set e2eConnectorIdentity.enabled=true \
+    --set e2eConnectorIdentity.namespacePrefix="$bad" \
+    -s templates/e2e-connector-identity.yaml >/dev/null 2>&1; then
+    fail f "prefix $bad covering a system or the release namespace rendered"
+  fi
+done
 
 echo "PASS e2e-connector-identity-assertions"
