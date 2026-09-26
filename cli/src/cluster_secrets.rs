@@ -128,14 +128,35 @@ pub fn bind_commands(opts: &BindOpts) -> Result<Vec<OpsCommand>> {
     ])
 }
 
+/// The release's supplied values with `agent`'s connector-secret binding
+/// removed and everything else untouched (#3021).
+pub fn without_agent_binding(release_values: &serde_json::Value, agent: &str) -> serde_json::Value {
+    let mut values = release_values.clone();
+    if let Some(all) = values
+        .pointer_mut("/agentSandbox/connectorSecrets")
+        .and_then(|all| all.as_object_mut())
+    {
+        all.remove(agent);
+    }
+    values
+}
+
 /// Remove the agent's binding from the release, then replace its claimed
-/// sandboxes (#3021). Helm's `key=null` deletes the map entry on
-/// `--reuse-values`, so the upgrade stops rendering the per-agent Secret and
-/// SandboxTemplate and prunes both; retiring the claims afterwards means no
-/// running pod keeps the removed credential in its env. The agent name is
-/// validated, so the `--set` path carries no value and no user-controlled
-/// separator.
-pub fn clear_commands(common: &CommonOpts, chart: &str, agent: &str) -> Result<Vec<OpsCommand>> {
+/// sandboxes (#3021).
+///
+/// The upgrade replaces the supplied values with `release_values` minus the
+/// agent's entry (`--reset-values` plus a private values file), so the chart
+/// stops rendering the per-agent Secret and SandboxTemplate and Helm prunes
+/// both. A `--reuse-values --set <agent>=null` upgrade is NOT equivalent: Helm
+/// drops the key from the stored values but still renders the old objects, so
+/// the credential would survive. Retiring the claims afterwards means no
+/// running pod keeps the removed credential in its env.
+pub fn clear_commands(
+    common: &CommonOpts,
+    chart: &str,
+    agent: &str,
+    release_values: &serde_json::Value,
+) -> Result<Vec<OpsCommand>> {
     validate_agent_resource_name(agent)?;
     Ok(vec![
         OpsCommand::new(
@@ -146,9 +167,8 @@ pub fn clear_commands(common: &CommonOpts, chart: &str, agent: &str) -> Result<V
                 plain(chart),
                 plain("-n"),
                 plain(&common.namespace),
-                plain("--reuse-values"),
-                plain("--set"),
-                plain(format!("agentSandbox.connectorSecrets.{agent}=null")),
+                plain("--reset-values"),
+                CmdArg::SecretValuesDocument(without_agent_binding(release_values, agent)),
             ],
         ),
         retire_claims_command(&common.namespace, agent),
@@ -243,30 +263,54 @@ fn helm_values_command(common: &CommonOpts) -> OpsCommand {
     )
 }
 
+/// The release's supplied values, or `None` when the read fails or does not
+/// parse.
+async fn read_release_values(common: &CommonOpts) -> Result<Option<serde_json::Value>> {
+    require_on_path("helm")?;
+    let (ok, stdout, _stderr) = crate::ops::run_capture(&helm_values_command(common)).await?;
+    Ok(if ok {
+        serde_json::from_str::<serde_json::Value>(&stdout).ok()
+    } else {
+        None
+    })
+}
+
+/// Judge the bind against the values read, or against their absence. A values
+/// read that fails or does not parse cannot prove the bind is a no-op, so
+/// every name counts as changed and the caller upgrades exactly as it did
+/// before this check existed. With nothing to bind, an unreadable release
+/// cannot prove a stale binding exists, so it is left alone and the operator
+/// is told (#3021).
+fn need_from_values(
+    values: Option<&serde_json::Value>,
+    common: &CommonOpts,
+    agent: &str,
+    secrets: &BTreeMap<String, String>,
+) -> BindNeed {
+    match values {
+        Some(values) => bind_need(values, agent, secrets),
+        None if secrets.is_empty() => {
+            crate::ui::ui().note(&format!(
+                "could not read the values of release {}; any existing connector-secret \
+                 binding for agent {agent} was left in place",
+                common.release
+            ));
+            BindNeed::Current
+        }
+        None => BindNeed::Changed(secrets.keys().cloned().collect()),
+    }
+}
+
 /// Read the release's supplied values and judge whether binding `secrets`
-/// for `agent` changes anything. A values read that fails or does not parse
-/// cannot prove the bind is a no-op, so every name counts as changed and the
-/// caller upgrades exactly as it did before this check existed.
+/// for `agent` changes anything.
 pub async fn read_bind_need(
     common: &CommonOpts,
     agent: &str,
     secrets: &BTreeMap<String, String>,
 ) -> Result<BindNeed> {
     validate_agent_resource_name(agent)?;
-    require_on_path("helm")?;
-    let (ok, stdout, _stderr) = crate::ops::run_capture(&helm_values_command(common)).await?;
-    let parsed = if ok {
-        serde_json::from_str::<serde_json::Value>(&stdout).ok()
-    } else {
-        None
-    };
-    Ok(match parsed {
-        Some(values) => bind_need(&values, agent, secrets),
-        // With nothing to bind, an unreadable release cannot prove a stale
-        // binding exists, so it is left alone exactly as before #3021.
-        None if secrets.is_empty() => BindNeed::Current,
-        None => BindNeed::Changed(secrets.keys().cloned().collect()),
-    })
+    let values = read_release_values(common).await?;
+    Ok(need_from_values(values.as_ref(), common, agent, secrets))
 }
 
 /// Bind only when the release does not already hold these values (#3082).
@@ -287,7 +331,9 @@ pub async fn bind_if_changed<F>(
 where
     F: std::future::Future<Output = Result<String>>,
 {
-    let need = read_bind_need(&common, &agent, &secrets).await?;
+    validate_agent_resource_name(&agent)?;
+    let values = read_release_values(&common).await?;
+    let need = need_from_values(values.as_ref(), &common, &agent, &secrets);
     let ui = crate::ui::ui();
     match &need {
         BindNeed::Current => {
@@ -338,7 +384,9 @@ where
                 "clearing connector secrets for agent {agent} on release {}",
                 common.release
             );
-            for cmd in &clear_commands(&common, &chart, &agent)? {
+            // `Clear` is only judged from values that were read.
+            let values = values.unwrap_or_default();
+            for cmd in &clear_commands(&common, &chart, &agent, &values)? {
                 run_step(&cl, &label, "cleared", cmd).await?;
             }
         }
