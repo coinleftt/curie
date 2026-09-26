@@ -1195,12 +1195,14 @@
           "/v1/internal/work-items/requests/{request_id}/termination/claim",
           "/v1/internal/work-items/requests/{request_id}/termination",
           "/v1/work-item-progress/{request_id}",
+          "/v1/work-item-progress/{request_id}/usage",
           "/v1/factory/cards/{token}.svg",
           "/schedules",
           "/schedules/{agent}/{name}/pause",
           "/schedules/{agent}/{name}/resume",
           "/work-items",
           "/work-items/{work_item_id}",
+          "/work-items/{work_item_id}/usage",
           "unmatched"
         ],
         "role": [
@@ -1224,7 +1226,7 @@
           "5xx"
         ]
       },
-      "cardinality_bound": 4240
+      "cardinality_bound": 4320
     },
     "curie.http.server.request.duration": {
       "type": "histogram",
@@ -1335,12 +1337,14 @@
           "/v1/internal/work-items/requests/{request_id}/termination/claim",
           "/v1/internal/work-items/requests/{request_id}/termination",
           "/v1/work-item-progress/{request_id}",
+          "/v1/work-item-progress/{request_id}/usage",
           "/v1/factory/cards/{token}.svg",
           "/schedules",
           "/schedules/{agent}/{name}/pause",
           "/schedules/{agent}/{name}/resume",
           "/work-items",
           "/work-items/{work_item_id}",
+          "/work-items/{work_item_id}/usage",
           "unmatched"
         ],
         "role": [
@@ -1364,7 +1368,7 @@
           "5xx"
         ]
       },
-      "cardinality_bound": 4240
+      "cardinality_bound": 4320
     },
     "curie.http.server.active": {
       "type": "up_down_counter",
@@ -1475,12 +1479,14 @@
           "/v1/internal/work-items/requests/{request_id}/termination/claim",
           "/v1/internal/work-items/requests/{request_id}/termination",
           "/v1/work-item-progress/{request_id}",
+          "/v1/work-item-progress/{request_id}/usage",
           "/v1/factory/cards/{token}.svg",
           "/schedules",
           "/schedules/{agent}/{name}/pause",
           "/schedules/{agent}/{name}/resume",
           "/work-items",
           "/work-items/{work_item_id}",
+          "/work-items/{work_item_id}/usage",
           "unmatched"
         ],
         "role": [
@@ -1497,7 +1503,7 @@
           "OTHER"
         ]
       },
-      "cardinality_bound": 848
+      "cardinality_bound": 864
     },
     "curie.background.loop": {
       "type": "counter",
