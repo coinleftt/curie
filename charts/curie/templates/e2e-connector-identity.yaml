@@ -46,6 +46,12 @@
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?-$" $prefix) }}
 {{- fail (printf "e2eConnectorIdentity.namespacePrefix %q must be a lowercase DNS label ending in '-'" $prefix) }}
 {{- end }}
+{{- /* The policy matches every service account in a prefixed namespace and
+       fails closed, so a prefix covering this release or a system namespace
+       would lock out that namespace's own service accounts. */}}
+{{- if or (hasPrefix $prefix .Release.Namespace) (hasPrefix $prefix "kube-system") (hasPrefix $prefix "default-") }}
+{{- fail (printf "e2eConnectorIdentity.namespacePrefix %q must not cover the release namespace %q or a system namespace" $prefix .Release.Namespace) }}
+{{- end }}
 {{- $labelKey := required "e2eConnectorIdentity.ownerLabel.key is required" $cfg.ownerLabel.key }}
 {{- if not (regexMatch "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$" $labelKey) }}
 {{- fail (printf "e2eConnectorIdentity.ownerLabel.key %q is not a valid label key" $labelKey) }}
