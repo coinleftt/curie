@@ -3572,7 +3572,9 @@ async fn bind_cluster_connector_secrets(
     secrets: std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
     // An empty map is not a no-op: a redeploy that drops every connector
-    // secret must clear the agent's stale binding (#3021). #3082: a bundle deploy whose connector secrets already match the
+    // secret must clear the agent's stale binding (#3021).
+    //
+    // #3082: a bundle deploy whose connector secrets already match the
     // release must not helm-upgrade the platform, so the chart is resolved
     // only when the bind actually changes something.
     let chart = async {
