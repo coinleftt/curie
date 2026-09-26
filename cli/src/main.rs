@@ -2559,6 +2559,16 @@ enum ClusterAction {
         /// rollback window stays intact (#2300).
         #[arg(long = "forward-only")]
         forward_only: bool,
+        /// Install the end to end connector's identity on this release's
+        /// cluster (ADR 0176 decision 4). Pass it only on the owner release of
+        /// a separate TEST cluster. It renders a service account that may
+        /// create and delete only namespaces carrying the connector's prefix
+        /// and ownership label, may act only inside them, and holds no cluster
+        /// scoped write; a ValidatingAdmissionPolicy enforces the prefix and
+        /// label at the API server (Kubernetes 1.30 or newer). A later
+        /// `cluster up` without this flag removes the identity.
+        #[arg(long = "e2e-connector-identity")]
+        e2e_connector_identity: bool,
     },
     /// Uninstall the release and sweep its runtime namespaces, running helm
     /// uninstall followed by kubectl delete namespace. The namespace delete
@@ -3463,6 +3473,10 @@ impl ClusterTargetSources {
         }
     }
 }
+
+/// The chart value `cluster up --e2e-connector-identity` sets (ADR 0176
+/// decision 4, #3243). The chart template owns the grant itself.
+const E2E_CONNECTOR_IDENTITY_SET: &str = "e2eConnectorIdentity.enabled=true";
 
 fn cluster_action_target(action: &ClusterAction) -> (Option<&str>, Option<&str>) {
     match action {
@@ -5091,10 +5105,14 @@ async fn run(command: Option<Command>) -> Result<()> {
                 dev,
                 dry_run,
                 forward_only,
+                e2e_connector_identity,
             } => {
                 let mut set = set;
                 if forward_only {
                     set.push("api.migrate.forwardOnly=true".to_string());
+                }
+                if e2e_connector_identity {
+                    set.push(E2E_CONNECTOR_IDENTITY_SET.to_string());
                 }
                 let resolved = artifacts::resolve_chart(
                     chart.as_deref(),

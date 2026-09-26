@@ -3273,6 +3273,18 @@ export const commandManifest = {
                 "false"
               ],
               "required": false
+            },
+            {
+              "global": false,
+              "help": "Install the end to end connector's identity on this release's cluster (ADR 0176 decision 4). Pass it only on the owner release of a separate TEST cluster. It renders a service account that may create and delete only namespaces carrying the connector's prefix and ownership label, may act only inside them, and holds no cluster scoped write; a ValidatingAdmissionPolicy enforces the prefix and label at the API server (Kubernetes 1.30 or newer). A later `cluster up` without this flag removes the identity",
+              "id": "e2e_connector_identity",
+              "long": "e2e-connector-identity",
+              "positional": false,
+              "possible_values": [
+                "true",
+                "false"
+              ],
+              "required": false
             }
           ],
           "hidden": false,
