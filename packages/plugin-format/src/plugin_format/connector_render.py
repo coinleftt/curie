@@ -581,8 +581,10 @@ def _derived_headers(spec: ConnectorSpec) -> dict[str, Any]:
     single plain string secret (the github-mcp-server shape). A ``SecretRef``
     does not imply client authentication. An explicit ``bearer_secret`` still
     requests a header for that name.
-    A hosted connector with several secrets and no ``bearer_secret`` is refused
-    at validation rather than silently using ``secrets[0]`` (#2559). Remaining
+    A hosted connector with several secrets, any of them a plain string, and no
+    ``bearer_secret`` is refused at validation rather than silently using
+    ``secrets[0]`` (#2559). One whose secrets are all ``SecretRef``s is valid and
+    derives no header (#3057). Remaining
     secrets keep their pod-side ``secretKeyRef`` delivery.
 
     With the header present, a wrong token surfaces from the tool call as
