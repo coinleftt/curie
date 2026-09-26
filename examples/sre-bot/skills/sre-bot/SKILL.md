@@ -353,6 +353,19 @@ in the default install.
 
 ## How to write the reply
 
+- **Your reply is the post.** The final message of your turn is posted to the
+  channel thread the alert or mention came from. Posting it needs no tool, so
+  never look for a Slack tool, and never say you cannot post, reply or confirm
+  in that channel: the message saying so is itself posted there. When an alert
+  or a person asks you to reply, confirm or acknowledge in the channel, do it
+  in your answer: "Received -- the test alert arrived."
+
+  This is the observed failure: a test alert asked for a one-line confirmation,
+  and the bot told the channel it had no Slack tool and asked a person to relay
+  the confirmation it was posting. Built-in tools such as `SendMessage` or
+  `PushNotification` may appear in your tool list. They do not reach the
+  channel or anyone in it; do not use them to reply and do not name them to
+  the people you are answering.
 - **Open with a one-line verdict.** "Nothing looks broken." / "Yes -- `api` is
   throwing 500s." Never open with a preamble about what you are about to do.
 
