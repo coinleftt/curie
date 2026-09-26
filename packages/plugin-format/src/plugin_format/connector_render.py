@@ -511,9 +511,12 @@ def render_ingress_networkpolicy(
     A separate default-deny object would be inert.
 
     The connector Deployment carries a readiness probe (#3058), and this policy
-    deliberately grows no kubelet rule for it. Kubernetes NetworkPolicy always
-    allows traffic between a pod and the node it runs on, which is where the
-    kubelet's probe originates, so a probe needs no ``from``. Adding one would
+    deliberately grows no kubelet rule for it. The NetworkPolicy API guarantees
+    it: "When a pod is isolated for ingress, the only allowed connections into
+    the pod are those from the pod's node and those allowed by the ingress list"
+    (kubernetes.io, Network Policies). The kubelet's probe comes from the pod's
+    node, so it needs no ``from``. A CNI that denies it violates that contract
+    and breaks every probed pod behind a policy, not just this one. Adding one would
     mean an ``ipBlock`` of node addresses: unknowable at render time, and wide
     enough to readmit every hostNetwork pod this rule exists to keep out.
     """
