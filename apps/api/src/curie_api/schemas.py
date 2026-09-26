@@ -8,6 +8,7 @@ import re
 import uuid
 from collections.abc import Callable
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
@@ -2001,6 +2002,56 @@ class WorkItemCiOut(BaseModel):
     reason: str | None = None
     head_sha: str | None = None
     observed_at: datetime | None = None
+
+
+class WorkItemUsageRole(BaseModel):
+    """Tokens and estimate of one role (#3223). The estimate covers priced rows only."""
+
+    tokens: int = 0
+    estimated_cost_usd: Decimal | None = None
+    cost_complete: bool = True
+
+
+class WorkItemUsageModel(BaseModel):
+    model: str
+    role: Literal["implementer", "reviewer"]
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_write_tokens: int = 0
+    output_tokens: int = 0
+    estimated_cost_usd: Decimal | None = None
+
+
+class WorkItemUsageRequest(BaseModel):
+    request_id: uuid.UUID
+    tokens: int = 0
+    estimated_cost_usd: Decimal | None = None
+
+
+class WorkItemUsagePriceSource(BaseModel):
+    source: str
+    as_of: datetime
+
+
+class WorkItemUsageOut(BaseModel):
+    """Token usage and estimated cost summed over every request of a WorkItem (#3223).
+
+    ``cost_complete`` is false when any reported model had no price, and then
+    ``estimated_cost_usd`` covers only the priced models. It is also false when
+    ``requests_without_usage`` (started requests with no usage report) is > 0.
+    """
+
+    work_item_id: uuid.UUID
+    total_tokens: int
+    estimated_cost_usd: Decimal | None
+    cost_complete: bool
+    requests_without_usage: int = 0
+    roles: dict[str, WorkItemUsageRole]
+    models: list[WorkItemUsageModel]
+    requests: list[WorkItemUsageRequest]
+    price_sources: list[WorkItemUsagePriceSource]
+    pr_number: int | None = None
+    pr_url: str | None = None
 
 
 class WorkItemOutcomeOut(BaseModel):
