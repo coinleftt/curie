@@ -510,7 +510,9 @@ mod tests {
     const HELM_STUB: &str = r#"#!/bin/sh
 case "$1 $2" in
   "get values") cat "$CURIE_TEST_BIND_DIR/values.json" ;;
-  upgrade*) echo "$*" >> "$CURIE_TEST_BIND_DIR/helm.log"; r=$(cat "$CURIE_TEST_BIND_DIR/revision"); echo $((r + 1)) > "$CURIE_TEST_BIND_DIR/revision" ;;
+  upgrade*) echo "$*" >> "$CURIE_TEST_BIND_DIR/helm.log"
+    prev=; for a in "$@"; do [ "$prev" = -f ] && cat "$a" >> "$CURIE_TEST_BIND_DIR/helm-values.log"; prev=$a; done
+    r=$(cat "$CURIE_TEST_BIND_DIR/revision"); echo $((r + 1)) > "$CURIE_TEST_BIND_DIR/revision" ;;
   *) echo "unexpected helm invocation: $*" >&2; exit 64 ;;
 esac
 "#;
@@ -654,7 +656,7 @@ esac
                 "acme-a": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_agent_a"},
                 "acme-b": {"JIRA_TOKEN": "jira-b"}
             }
-        }}));
+        }, "worker": {"replicas": 2}}));
         let need = bind_if_changed(common(), "acme-a".into(), BTreeMap::new(), async {
             Ok("charts/curie".to_string())
         })
@@ -667,14 +669,21 @@ esac
             "the stale binding was left in the release"
         );
         let upgrade = std::fs::read_to_string(helm.dir.path().join("helm.log")).unwrap();
-        assert!(upgrade.contains("--reuse-values"), "{upgrade}");
-        assert!(
-            upgrade.contains("agentSandbox.connectorSecrets.acme-a=null"),
-            "the agent's binding must be removed from the values: {upgrade}"
-        );
-        assert!(
-            !upgrade.contains("acme-b"),
-            "another agent was touched: {upgrade}"
+        // `--reuse-values --set <agent>=null` drops the key from the stored
+        // values but still renders the old Secret, so the supplied values
+        // must be replaced, not merged.
+        assert!(upgrade.contains("--reset-values"), "{upgrade}");
+        assert!(!upgrade.contains("--reuse-values"), "{upgrade}");
+        let supplied: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(helm.dir.path().join("helm-values.log")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            supplied,
+            serde_json::json!({"agentSandbox": {"connectorSecrets": {
+                "acme-b": {"JIRA_TOKEN": "jira-b"}
+            }}, "worker": {"replicas": 2}}),
+            "only the agent's binding may be removed from the supplied values"
         );
         let kubectl = std::fs::read_to_string(helm.dir.path().join("kubectl.log")).unwrap();
         assert!(
