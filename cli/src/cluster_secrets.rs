@@ -452,7 +452,7 @@ mod tests {
     const HELM_STUB: &str = r#"#!/bin/sh
 case "$1 $2" in
   "get values") cat "$CURIE_TEST_BIND_DIR/values.json" ;;
-  upgrade*) r=$(cat "$CURIE_TEST_BIND_DIR/revision"); echo $((r + 1)) > "$CURIE_TEST_BIND_DIR/revision" ;;
+  upgrade*) echo "$*" >> "$CURIE_TEST_BIND_DIR/helm.log"; r=$(cat "$CURIE_TEST_BIND_DIR/revision"); echo $((r + 1)) > "$CURIE_TEST_BIND_DIR/revision" ;;
   *) echo "unexpected helm invocation: $*" >&2; exit 64 ;;
 esac
 "#;
@@ -566,5 +566,69 @@ esac
             BindNeed::Changed(vec!["GITHUB_PERSONAL_ACCESS_TOKEN".into()])
         );
         assert_eq!(helm.revision(), 8);
+    }
+
+    #[test]
+    fn bind_need_clears_a_binding_the_redeploy_no_longer_carries() {
+        let bound = serde_json::json!({"agentSandbox": {"connectorSecrets": {
+            "acme-a": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_agent_a"},
+            "acme-b": {"JIRA_TOKEN": "jira-b"}
+        }}});
+        assert_eq!(
+            bind_need(&bound, "acme-a", &BTreeMap::new()),
+            BindNeed::Clear
+        );
+        assert_eq!(
+            bind_need(&bound, "acme-c", &BTreeMap::new()),
+            BindNeed::Current
+        );
+        assert_eq!(
+            bind_need(&serde_json::json!({}), "acme-a", &BTreeMap::new()),
+            BindNeed::Current
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_every_secret_clears_the_binding_then_retires_claims() {
+        let _env = crate::PROCESS_ENV_LOCK.lock().await;
+        let helm = StubbedHelm::install(&serde_json::json!({"agentSandbox": {
+            "connectorSecrets": {
+                "acme-a": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_agent_a"},
+                "acme-b": {"JIRA_TOKEN": "jira-b"}
+            }
+        }}));
+        let need = bind_if_changed(common(), "acme-a".into(), BTreeMap::new(), async {
+            Ok("charts/curie".to_string())
+        })
+        .await
+        .unwrap();
+        assert_eq!(need, BindNeed::Clear);
+        assert_eq!(helm.revision(), 8, "the stale binding was left in the release");
+        let upgrade = std::fs::read_to_string(helm.dir.path().join("helm.log")).unwrap();
+        assert!(upgrade.contains("--reuse-values"), "{upgrade}");
+        assert!(
+            upgrade.contains("agentSandbox.connectorSecrets.acme-a=null"),
+            "the agent's binding must be removed from the values: {upgrade}"
+        );
+        assert!(!upgrade.contains("acme-b"), "another agent was touched: {upgrade}");
+        let kubectl = std::fs::read_to_string(helm.dir.path().join("kubectl.log")).unwrap();
+        assert!(
+            kubectl.contains("delete sandboxclaim") && kubectl.contains("=acme-a"),
+            "claims must be refreshed so no pod keeps the removed credential: {kubectl}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_secrets_and_no_binding_leaves_the_release_alone() {
+        let _env = crate::PROCESS_ENV_LOCK.lock().await;
+        let helm = StubbedHelm::install(&serde_json::json!({}));
+        let need = bind_if_changed(common(), "acme-a".into(), BTreeMap::new(), async {
+            panic!("nothing to clear must not resolve a chart")
+        })
+        .await
+        .unwrap();
+        assert_eq!(need, BindNeed::Current);
+        assert_eq!(helm.revision(), 7);
+        assert!(!helm.dir.path().join("kubectl.log").exists());
     }
 }
