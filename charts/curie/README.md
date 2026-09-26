@@ -1275,6 +1275,46 @@ runtimeclass is absent it is marked NOT-TESTABLE (per the security-boundary test
 enforcement asserted separately by the preflight and proven live in the security-boundary test plan
 (`uname` = `4.19.0-gvisor`).
 
+## End to end connector identity on a test cluster (ADR 0176)
+
+`curie cluster up --e2e-connector-identity` (chart value
+`e2eConnectorIdentity.enabled`) installs the identity the end to end connector
+uses on a separate **test** cluster. Pass it only on that cluster's owner
+release (ADR 0129), never on the cluster that runs the factory. It needs
+Kubernetes 1.30 or newer for `admissionregistration.k8s.io/v1`.
+
+What it grants, and how the cluster enforces it:
+
+- A service account, `<fullname>-e2e-connector`, with a cluster grant of
+  exactly: read, create and delete namespaces; create RoleBindings; and `bind`
+  on one ClusterRole, `<fullname>-e2e-connector-namespace`. No namespace update
+  or patch, and no other cluster scoped write.
+- The `-namespace` ClusterRole is bound only by a RoleBinding the connector
+  creates inside a namespace it created. That RoleBinding is its only source of
+  namespaced reads and writes, so every other namespace is unreadable to it.
+- A ValidatingAdmissionPolicy matched to that service account alone, failing
+  closed. It admits a namespace create or delete only when the name starts with
+  `e2eConnectorIdentity.namespacePrefix` (default `curie-e2e-`) and the namespace
+  carries `e2eConnectorIdentity.ownerLabel` (default
+  `curietech.ai/e2e-owner=<release>`); admits a namespaced write only inside
+  such a namespace; denies every other cluster scoped write; and refuses a
+  RoleBinding that hands the `-namespace` role to any other subject.
+
+A namespace an administrator creates with the prefix and label is inside the
+identity's scope by definition: the label is the ownership claim. Only the
+identity and cluster administrators can create such a namespace.
+
+`ci/e2e-connector-identity-assertions.sh` pins the rendered grant.
+`ci/runtime/e2e-connector-identity-runtime.sh` proves each denial against a live
+API server by impersonating the service account:
+
+```bash
+CURIE_E2E_IDENTITY_CONTEXT=<test cluster context> \
+  bash charts/curie/ci/runtime/e2e-connector-identity-runtime.sh
+```
+
+It creates only objects named from its run id and deletes them on exit.
+
 ## Uninstalling and CRD lifecycle
 
 `helm uninstall <release> -n <ns>` removes everything the chart templated, but
