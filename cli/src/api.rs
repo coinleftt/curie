@@ -943,7 +943,7 @@ pub struct WorkItemRequest {
     pub sequence: u64,
     pub status: String,
     pub created_at: String,
-    pub wait_deadline: String,
+    pub wait_deadline: Option<String>,
     pub started_at: Option<String>,
     pub execution_deadline: Option<String>,
     pub terminal_at: Option<String>,

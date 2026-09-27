@@ -372,7 +372,8 @@ def _complete(request_id: uuid.UUID) -> None:
 
 def _requests(number: int) -> list[dict[str, Any]]:
     return _rows(
-        "SELECT r.id, r.sequence, r.status, r.terminal_cause, r.objective, r.requester, r.reply_kind, "
+        "SELECT r.id, r.sequence, r.status, r.terminal_cause, "
+        "r.objective, r.requester, r.reply_kind, "
         "r.reply_address, r.reply_conversation_id, w.id AS work_item_id, "
         "w.conversation_id AS work_item_conversation "
         "FROM curie.execution_requests r "

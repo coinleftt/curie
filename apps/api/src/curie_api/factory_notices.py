@@ -164,6 +164,7 @@ STATE_LABELS = (
 )
 LEGACY_STATE_LABELS = ("curie:queued", "curie:running", "curie:pr-open", "curie:needs-human")
 _DESIRED_LABEL = {
+    "queued": "curie-factory:queued",
     "waiting": "curie-factory:queued",
     "running": "curie-factory:running",
     "cancellation_requested": "curie-factory:running",
@@ -220,6 +221,12 @@ def result_section(
             "Stopped: this run was cancelled because the factory label was removed "
             "or the issue was closed. Add the label again to start a new run.\n"
             # tools/factory-e2e reads the cause from this line.
+            f"Cause: {cause}\n"
+        )
+    elif cause == "lineage_closed":
+        text = (
+            "Could not start this revision because its pull request closed "
+            "while the earlier run was finishing.\n"
             f"Cause: {cause}\n"
         )
     else:
@@ -279,6 +286,7 @@ def status_body(
     phase_view: PhaseView | None,
     result: str | None,
     paused_for_upgrade: bool = False,
+    waiting_line: str | None = None,
 ) -> str:
     """The whole status comment. A ``result`` makes it the final body.
 
@@ -298,6 +306,8 @@ def status_body(
     elif result is None:
         parts.append(_WAITING_FOR_PROGRESS)
     parts.append(f"Status: {pill_label}")
+    if waiting_line is not None:
+        parts.append(waiting_line)
     if paused_for_upgrade and pill_label == "QUEUED":
         parts.append(_PAUSED_FOR_UPGRADE_LINE)
     if result is not None:
@@ -336,9 +346,18 @@ async def sync_status_comments(
     """
 
     later = aliased(ExecutionRequest)
-    is_latest = ~exists().where(
-        later.work_item_id == ExecutionRequest.work_item_id,
-        later.sequence > ExecutionRequest.sequence,
+    is_latest = and_(
+        ExecutionRequest.status != "queued",
+        or_(
+            ExecutionRequest.status != "cancelled",
+            ExecutionRequest.wait_deadline.is_not(None),
+        ),
+        ~exists().where(
+            later.work_item_id == ExecutionRequest.work_item_id,
+            later.sequence > ExecutionRequest.sequence,
+            later.status != "queued",
+            or_(later.status != "cancelled", later.wait_deadline.is_not(None)),
+        ),
     )
     label_due = and_(
         is_latest,
@@ -581,6 +600,21 @@ async def _render(
         )
         view = phase_view(row.declaration, reports, request.status, cause)
     pill_label, _color, _live = pill_for(request.status, publishing)
+    pending_count = await session.scalar(
+        select(func.count(ExecutionRequest.id)).where(
+            ExecutionRequest.work_item_id == work_item.id,
+            ExecutionRequest.status == "queued",
+        )
+    )
+    waiting_line: str | None = None
+    if request.status == "queued":
+        waiting_line = (
+            "This revision is waiting on the current run. "
+            "It will start when that run finishes."
+        )
+    elif request.status in {"waiting", "running", "cancellation_requested"} and pending_count:
+        word = "revision" if pending_count == 1 else "revisions"
+        waiting_line = f"{pending_count} {word} waiting on this run."
     base = settings.github_factory_card_base_url
     return status_body(
         request_id=row.execution_request_id,
@@ -589,6 +623,7 @@ async def _render(
         phase_view=view,
         result=result,
         paused_for_upgrade=paused_for_upgrade,
+        waiting_line=waiting_line,
     )
 
 
