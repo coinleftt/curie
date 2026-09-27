@@ -128,6 +128,53 @@ pub fn bind_commands(opts: &BindOpts) -> Result<Vec<OpsCommand>> {
     ])
 }
 
+/// The release's supplied values with `agent`'s connector-secret binding
+/// removed and everything else untouched (#3021).
+pub fn without_agent_binding(release_values: &serde_json::Value, agent: &str) -> serde_json::Value {
+    let mut values = release_values.clone();
+    if let Some(all) = values
+        .pointer_mut("/agentSandbox/connectorSecrets")
+        .and_then(|all| all.as_object_mut())
+    {
+        all.remove(agent);
+    }
+    values
+}
+
+/// Remove the agent's binding from the release, then replace its claimed
+/// sandboxes (#3021).
+///
+/// The upgrade replaces the supplied values with `release_values` minus the
+/// agent's entry (`--reset-values` plus a private values file), so the chart
+/// stops rendering the per-agent Secret and SandboxTemplate and Helm prunes
+/// both. A `--reuse-values --set <agent>=null` upgrade is NOT equivalent: Helm
+/// drops the key from the stored values but still renders the old objects, so
+/// the credential would survive. Retiring the claims afterwards means no
+/// running pod keeps the removed credential in its env.
+pub fn clear_commands(
+    common: &CommonOpts,
+    chart: &str,
+    agent: &str,
+    release_values: &serde_json::Value,
+) -> Result<Vec<OpsCommand>> {
+    validate_agent_resource_name(agent)?;
+    Ok(vec![
+        OpsCommand::new(
+            "helm",
+            vec![
+                plain("upgrade"),
+                plain(&common.release),
+                plain(chart),
+                plain("-n"),
+                plain(&common.namespace),
+                plain("--reset-values"),
+                CmdArg::SecretValuesDocument(without_agent_binding(release_values, agent)),
+            ],
+        ),
+        retire_claims_command(&common.namespace, agent),
+    ])
+}
+
 /// Replace the agent's claimed sandboxes so the next turn starts a fresh pod
 /// with the newly deployed bundle and re-resolved secretKeyRef env.
 fn retire_claims_command(namespace: &str, agent: &str) -> OpsCommand {
@@ -156,6 +203,10 @@ pub enum BindNeed {
     /// These names are missing or hold a different value. Names only, never
     /// values.
     Changed(Vec<String>),
+    /// The redeploy carries no connector secret for this agent but the release
+    /// still binds some (#3021). Leaving them would keep a removed credential
+    /// reachable by the agent's runner pods, so the binding is cleared.
+    Clear,
 }
 
 /// Pure over the JSON `helm get values -o json` returns for the release.
@@ -170,6 +221,16 @@ pub fn bind_need(
     let bound = release_values
         .pointer("/agentSandbox/connectorSecrets")
         .and_then(|all| all.get(agent));
+    if secrets.is_empty() {
+        let still_bound = bound
+            .and_then(|b| b.as_object())
+            .is_some_and(|b| !b.is_empty());
+        return if still_bound {
+            BindNeed::Clear
+        } else {
+            BindNeed::Current
+        };
+    }
     let changed: Vec<String> = secrets
         .iter()
         .filter(|(name, value)| {
@@ -202,30 +263,54 @@ fn helm_values_command(common: &CommonOpts) -> OpsCommand {
     )
 }
 
+/// The release's supplied values, or `None` when the read fails or does not
+/// parse.
+async fn read_release_values(common: &CommonOpts) -> Result<Option<serde_json::Value>> {
+    require_on_path("helm")?;
+    let (ok, stdout, _stderr) = crate::ops::run_capture(&helm_values_command(common)).await?;
+    Ok(if ok {
+        serde_json::from_str::<serde_json::Value>(&stdout).ok()
+    } else {
+        None
+    })
+}
+
+/// Judge the bind against the values read, or against their absence. A values
+/// read that fails or does not parse cannot prove the bind is a no-op, so
+/// every name counts as changed and the caller upgrades exactly as it did
+/// before this check existed. With nothing to bind, an unreadable release
+/// cannot prove a stale binding exists, so it is left alone and the operator
+/// is told (#3021).
+fn need_from_values(
+    values: Option<&serde_json::Value>,
+    common: &CommonOpts,
+    agent: &str,
+    secrets: &BTreeMap<String, String>,
+) -> BindNeed {
+    match values {
+        Some(values) => bind_need(values, agent, secrets),
+        None if secrets.is_empty() => {
+            crate::ui::ui().note(&format!(
+                "could not read the values of release {}; any existing connector-secret \
+                 binding for agent {agent} was left in place",
+                common.release
+            ));
+            BindNeed::Current
+        }
+        None => BindNeed::Changed(secrets.keys().cloned().collect()),
+    }
+}
+
 /// Read the release's supplied values and judge whether binding `secrets`
-/// for `agent` changes anything. A values read that fails or does not parse
-/// cannot prove the bind is a no-op, so every name counts as changed and the
-/// caller upgrades exactly as it did before this check existed.
+/// for `agent` changes anything.
 pub async fn read_bind_need(
     common: &CommonOpts,
     agent: &str,
     secrets: &BTreeMap<String, String>,
 ) -> Result<BindNeed> {
     validate_agent_resource_name(agent)?;
-    if secrets.is_empty() {
-        return Ok(BindNeed::Current);
-    }
-    require_on_path("helm")?;
-    let (ok, stdout, _stderr) = crate::ops::run_capture(&helm_values_command(common)).await?;
-    let parsed = if ok {
-        serde_json::from_str::<serde_json::Value>(&stdout).ok()
-    } else {
-        None
-    };
-    Ok(match parsed {
-        Some(values) => bind_need(&values, agent, secrets),
-        None => BindNeed::Changed(secrets.keys().cloned().collect()),
-    })
+    let values = read_release_values(common).await?;
+    Ok(need_from_values(values.as_ref(), common, agent, secrets))
 }
 
 /// Bind only when the release does not already hold these values (#3082).
@@ -246,7 +331,9 @@ pub async fn bind_if_changed<F>(
 where
     F: std::future::Future<Output = Result<String>>,
 {
-    let need = read_bind_need(&common, &agent, &secrets).await?;
+    validate_agent_resource_name(&agent)?;
+    let values = read_release_values(&common).await?;
+    let need = need_from_values(values.as_ref(), &common, &agent, &secrets);
     let ui = crate::ui::ui();
     match &need {
         BindNeed::Current => {
@@ -283,6 +370,25 @@ where
                 secrets,
             })
             .await?;
+        }
+        BindNeed::Clear => {
+            ui.note(&format!(
+                "platform change required: agent {agent} no longer declares any connector \
+                 secret, so release {} is being helm-upgraded to remove its binding",
+                common.release
+            ));
+            let chart = chart.await?;
+            require_on_path("kubectl")?;
+            let cl = ui.checklist();
+            let label = format!(
+                "clearing connector secrets for agent {agent} on release {}",
+                common.release
+            );
+            // `Clear` is only judged from values that were read.
+            let values = values.unwrap_or_default();
+            for cmd in &clear_commands(&common, &chart, &agent, &values)? {
+                run_step(&cl, &label, "cleared", cmd).await?;
+            }
         }
     }
     Ok(need)
@@ -452,7 +558,9 @@ mod tests {
     const HELM_STUB: &str = r#"#!/bin/sh
 case "$1 $2" in
   "get values") cat "$CURIE_TEST_BIND_DIR/values.json" ;;
-  upgrade*) r=$(cat "$CURIE_TEST_BIND_DIR/revision"); echo $((r + 1)) > "$CURIE_TEST_BIND_DIR/revision" ;;
+  upgrade*) echo "$*" >> "$CURIE_TEST_BIND_DIR/helm.log"
+    prev=; for a in "$@"; do [ "$prev" = -f ] && cat "$a" >> "$CURIE_TEST_BIND_DIR/helm-values.log"; prev=$a; done
+    r=$(cat "$CURIE_TEST_BIND_DIR/revision"); echo $((r + 1)) > "$CURIE_TEST_BIND_DIR/revision" ;;
   *) echo "unexpected helm invocation: $*" >&2; exit 64 ;;
 esac
 "#;
@@ -566,5 +674,83 @@ esac
             BindNeed::Changed(vec!["GITHUB_PERSONAL_ACCESS_TOKEN".into()])
         );
         assert_eq!(helm.revision(), 8);
+    }
+
+    #[test]
+    fn bind_need_clears_a_binding_the_redeploy_no_longer_carries() {
+        let bound = serde_json::json!({"agentSandbox": {"connectorSecrets": {
+            "acme-a": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_agent_a"},
+            "acme-b": {"JIRA_TOKEN": "jira-b"}
+        }}});
+        assert_eq!(
+            bind_need(&bound, "acme-a", &BTreeMap::new()),
+            BindNeed::Clear
+        );
+        assert_eq!(
+            bind_need(&bound, "acme-c", &BTreeMap::new()),
+            BindNeed::Current
+        );
+        assert_eq!(
+            bind_need(&serde_json::json!({}), "acme-a", &BTreeMap::new()),
+            BindNeed::Current
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_every_secret_clears_the_binding_then_retires_claims() {
+        let _env = crate::PROCESS_ENV_LOCK.lock().await;
+        let helm = StubbedHelm::install(&serde_json::json!({"agentSandbox": {
+            "connectorSecrets": {
+                "acme-a": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_agent_a"},
+                "acme-b": {"JIRA_TOKEN": "jira-b"}
+            }
+        }, "worker": {"replicas": 2}}));
+        let need = bind_if_changed(common(), "acme-a".into(), BTreeMap::new(), async {
+            Ok("charts/curie".to_string())
+        })
+        .await
+        .unwrap();
+        assert_eq!(need, BindNeed::Clear);
+        assert_eq!(
+            helm.revision(),
+            8,
+            "the stale binding was left in the release"
+        );
+        let upgrade = std::fs::read_to_string(helm.dir.path().join("helm.log")).unwrap();
+        // `--reuse-values --set <agent>=null` drops the key from the stored
+        // values but still renders the old Secret, so the supplied values
+        // must be replaced, not merged.
+        assert!(upgrade.contains("--reset-values"), "{upgrade}");
+        assert!(!upgrade.contains("--reuse-values"), "{upgrade}");
+        let supplied: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(helm.dir.path().join("helm-values.log")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            supplied,
+            serde_json::json!({"agentSandbox": {"connectorSecrets": {
+                "acme-b": {"JIRA_TOKEN": "jira-b"}
+            }}, "worker": {"replicas": 2}}),
+            "only the agent's binding may be removed from the supplied values"
+        );
+        let kubectl = std::fs::read_to_string(helm.dir.path().join("kubectl.log")).unwrap();
+        assert!(
+            kubectl.contains("delete sandboxclaim") && kubectl.contains("=acme-a"),
+            "claims must be refreshed so no pod keeps the removed credential: {kubectl}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_secrets_and_no_binding_leaves_the_release_alone() {
+        let _env = crate::PROCESS_ENV_LOCK.lock().await;
+        let helm = StubbedHelm::install(&serde_json::json!({}));
+        let need = bind_if_changed(common(), "acme-a".into(), BTreeMap::new(), async {
+            panic!("nothing to clear must not resolve a chart")
+        })
+        .await
+        .unwrap();
+        assert_eq!(need, BindNeed::Current);
+        assert_eq!(helm.revision(), 7);
+        assert!(!helm.dir.path().join("kubectl.log").exists());
     }
 }
