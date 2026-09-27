@@ -1679,6 +1679,94 @@ class Kernel:
                 exc_info=True,
             )
 
+    async def notify_broker_entry_vanished(
+        self, qevent: QueuedTurn, *, lease: DeliveryLease | None
+    ) -> None:
+        """Edit the placeholder after the broker entry is gone.
+
+        Unlike :meth:`notify_turn_not_started`, lease loss is not a reason to
+        stay silent. ADR-0131 skips the notice when a successor owns the fence.
+        A vanished entry has no successor, so this edit is allowed only when
+        ``lease.entry_vanished`` is set. It is still best-effort and it still
+        refuses to overwrite a terminal reply.
+        """
+        if lease is None or not lease.entry_vanished.is_set():
+            return
+
+        event_id = qevent.event_id
+        attempted = event_id in self._terminal_reply_attempted
+        self._terminal_reply_attempted.discard(event_id)
+        factory_work_item_turn = self._is_factory_work_item_turn(event_id)
+        self._factory_work_item_events.discard(event_id)
+
+        if factory_work_item_turn:
+            logger.debug(
+                "event %s belongs to a factory execution; no not started notice",
+                event_id,
+            )
+            return
+
+        handle = qevent.reply_handle
+        if handle is None:
+            logger.debug(
+                "event %s has no reply target; no not started notice",
+                event_id,
+            )
+            return
+
+        if handle.placeholder is None:
+            logger.debug(
+                "event %s has no placeholder to edit; no not-started notice",
+                event_id,
+            )
+            return
+
+        if attempted:
+            logger.warning(
+                "skipping the not-started notice for event %s: this delivery had "
+                "already sent the person a result, and an ambiguous send may still "
+                "have landed",
+                event_id,
+            )
+            return
+
+        try:
+            already_terminal = await self._markers.is_terminal(event_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "terminality unreadable for event %s; skipping the not-started "
+                "notice rather than risk overwriting a delivered answer",
+                event_id,
+                exc_info=True,
+            )
+            return
+
+        if already_terminal:
+            logger.warning(
+                "event %s failed after settling terminally; leaving its delivered "
+                "reply in place rather than promising a retry that cannot happen",
+                event_id,
+            )
+            return
+
+        try:
+            await self._reply_for(
+                qevent,
+                _route_from_handle(qevent),
+                self._config.turn_not_started_text,
+                terminal=False,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "the not-started notice for event %s could not be delivered",
+                event_id,
+                exc_info=True,
+            )
+
     async def notify_capacity_queued(self, qevent: QueuedTurn) -> ReplyAck:
         try:
             return await self._reply_for(
