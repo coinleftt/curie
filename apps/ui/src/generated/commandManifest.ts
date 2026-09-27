@@ -4145,7 +4145,7 @@ export const commandManifest = {
             },
             {
               "global": false,
-              "help": "Host the in-cluster worker uses to reach the stub. Omit to auto-detect the local IP the kernel would use to reach the cluster",
+              "help": "Accepted so older command lines still parse. Text-graded cluster eval does not use it: replies go through the cluster message relay",
               "id": "listen_host",
               "long": "listen-host",
               "positional": false,
@@ -4156,7 +4156,7 @@ export const commandManifest = {
                 "0"
               ],
               "global": false,
-              "help": "Port the stub binds (0.0.0.0); the worker posts here. Default 0 lets the kernel assign an ephemeral port",
+              "help": "Accepted so older command lines still parse. Text-graded cluster eval does not use it: replies go through the cluster message relay",
               "id": "listen_port",
               "long": "listen-port",
               "positional": false,
@@ -4187,7 +4187,7 @@ export const commandManifest = {
                 "0"
               ],
               "global": false,
-              "help": "Local port the API port-forward binds (default-channel lookup). Default 0 is kernel-assigned, matching `cluster message`",
+              "help": "Local port the API port-forward binds. The relay poll and a missing channel lookup both use it. Default 0 is kernel-assigned, matching `cluster message`",
               "id": "api_local_port",
               "long": "api-local-port",
               "positional": false,
@@ -4196,7 +4196,7 @@ export const commandManifest = {
             {
               "env": "CURIE_API_KEY",
               "global": false,
-              "help": "Platform API key for the default-channel lookup. Omit to read the release's own key from its chart Secret",
+              "help": "Platform API key. It authenticates the relay poll and a missing-channel lookup. Omit to read the release's own key from its chart Secret",
               "id": "api_key",
               "long": "api-key",
               "positional": false,
@@ -4297,7 +4297,7 @@ export const commandManifest = {
             },
             {
               "global": false,
-              "help": "Print the kubectl commands, stub URL, and enqueue description that a real run would produce, and exit without executing anything",
+              "help": "Print the kubectl port-forwards and relay poll a real run would use, and exit without executing anything",
               "id": "dry_run",
               "long": "dry-run",
               "positional": false,
