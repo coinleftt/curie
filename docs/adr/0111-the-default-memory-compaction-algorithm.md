@@ -4,7 +4,7 @@ Date: 2026-08-17
 
 Status: Draft
 
-**Folded into [ADR-0167](0167-agent-and-channel-memory-are-written-by-the-agent-guided-by-the-bot-definition.md). Not proposed for acceptance on its own.** ADR-0167
+**Folded into [ADR-0167](0167-agent-and-channel-memory-are-written-by-the-agent-guided-by-editable-guidance.md). Not proposed for acceptance on its own.** ADR-0167
 decides the write path this document assumed was unnecessary (clause 2) and
 leaves compaction to an optional memory package an operator can choose
 ([#3113](https://github.com/curie-eng/curie/issues/3113)), whose design can

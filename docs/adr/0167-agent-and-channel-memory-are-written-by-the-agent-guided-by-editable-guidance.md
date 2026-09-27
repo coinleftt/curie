@@ -1,4 +1,4 @@
-# 167. Agent and channel memory are written by the agent, guided by the bot definition
+# 167. Agent and channel memory are written by the agent, guided by editable guidance
 
 Date: 2026-09-21
 
@@ -47,11 +47,14 @@ police them.
 piece of prose says what is worth remembering in each memory and what to leave
 out. It is defined on its own, apart from the tools, and injected into the
 system prompt like the rest of the agent's instructions; there is no special
-memory section. The platform ships a default. A bundle replaces it with its
-own as part of the bot definition. This is what keeps memory from becoming
-"anything the agent wants, whenever it wants": the agent is told plainly what
-to keep, and the default tells it to keep nothing in agent memory, so a fact
-reaches every channel only if the bot definition says it should.
+memory section. To an operator it is one editable field on the agent: it
+shows the platform's default until someone changes it, and resetting it
+brings the default back. Internally only an operator's own version is stored,
+so an agent that never customised its guidance picks up any later improvement
+to the default. This is what keeps memory from becoming "anything the agent
+wants, whenever it wants": the agent is told plainly what to keep, and the
+default tells it to keep nothing in agent memory, so a fact reaches every
+channel only if an operator's guidance says it should.
 
 **How memory is kept as it grows is left to the user.** The core stores facts
 and loads them at boot, within the store's existing limits. How memory is
@@ -130,8 +133,8 @@ model reads, not a list the platform matches against.
 - **Platform-enforced privacy rules** (classifying channels as private or
   public, blocking writes by channel type, filtering what each session sees,
   checking replies on the way out). Rejected as over-design. The guidance
-  already tells the agent what may reach agent memory, and a bot definition
-  that allows facts there is choosing to let them travel.
+  already tells the agent what may reach agent memory, and an operator whose
+  guidance allows facts there is choosing to let them travel.
 - **Choose one growth strategy for every agent.** Rejected. An index with
   detail on demand never drops a fact but loads less as memory grows;
   scheduled compaction recalls more but costs more and can drop correct facts.
@@ -165,23 +168,26 @@ model reads, not a list the platform matches against.
 - Each channel's memory gets its own storage scope, using the existing
   `binding_scope` column, so each has its own size limit instead of all
   channels sharing one agent-wide limit.
-- A bundle needs a way to provide its own guidance in place of the default:
-  a field or file in the bundle format, which is a frozen contract, so it gets
-  its own issue before any code, like the `boot_env` change.
+- The guidance and the on switch are operator settings on the agent, set with
+  `curie cluster agent` like its model and thinking. The guidance is stored as
+  one key in the agent's memory, which the runner already reads at boot, so it
+  needs no contract change. A bundle can't ship guidance with the bot; a
+  bundle-level default can be added later between the platform default and an
+  operator's version.
 - **Email:** the channel is the mailbox binding, so every thread in a mailbox
   shares one channel memory. A mailbox that serves many outside senders mixes
-  what they said; a bot definition for a shared mailbox can tell its agent
-  not to keep channel memory.
+  what they said; an operator can set that agent's guidance to keep no channel
+  memory.
 - Keeping private information in its channel is the agent's judgment,
   following the guidance, not a platform guarantee. Nothing mechanical stops a
   fact from a direct message reaching agent memory if the model misjudges it.
-  The default guidance keeps nothing in agent memory for that reason, and a bot
-  definition that allows agent memory accepts that risk.
+  The default guidance keeps nothing in agent memory for that reason, and an
+  operator who allows agent memory accepts that risk.
 - Loading every fact at boot is fine while memory is small. An agent that
   saves often will outgrow it and need one of the packages; until then, saves
   are refused at the store's limit.
-- The existing single `log` row migrates into agent memory as facts with no
-  author.
+- The existing single `log` row, which today's operator `--add` writes to,
+  keeps being read as agent memory, shown with no author. It isn't migrated.
 - [ADR-0095](0095-tiered-memory-lifecycle.md) and
   [ADR-0111](0111-the-default-memory-compaction-algorithm.md) are folded into
   this one. The acceptance PR sets them to `Superseded by ADR-0167`.
@@ -191,8 +197,8 @@ model reads, not a list the platform matches against.
 1. A fact saved in one thread shows up in a new thread in the same channel,
    and not in another channel or for another agent in the same channel.
 2. With memory off, no tools are mounted.
-3. The default guidance is injected into the system prompt, and a bundle's own
-   guidance replaces it.
+3. The default guidance is injected into the system prompt; an operator's own
+   version replaces it; resetting it brings the default back.
 4. `remember` adds a new fact and never replaces one; `update` replaces a fact
    by id; `forget` removes one.
 5. A save past the store's limit is refused and reported to the agent as
