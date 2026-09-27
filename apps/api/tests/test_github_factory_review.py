@@ -681,6 +681,57 @@ def test_distinct_review_mentions_wait_in_order_until_each_live_run_ends(
     assert rows[2]["id"] == second_revision_id
 
 
+def test_review_admission_survives_work_item_version_change_during_verification(
+    factory: tuple[TestClient, ReviewGitHubAPI], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from curie_api import github_factory_review
+
+    client, api = factory
+    number, first = _admit_issue(client, api)
+    pr = next(_PULLS)
+    api.open_pull(pr)
+    _own_pull_request(first["work_item_id"], pr)
+    _mark_running(first["id"])
+    payload, fid = _feedback_event(api, "issue_comment", pr, _mention())
+    verify = github_factory_review.verify_feedback_truth
+    bumped = False
+
+    async def verify_with_version_change(*args: Any, **kwargs: Any) -> None:
+        nonlocal bumped
+        await verify(*args, **kwargs)
+        if bumped:
+            return
+        bumped = True
+        engine = create_async_engine(get_settings().database_url)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "UPDATE curie.work_items SET version = version + 1 "
+                        "WHERE id = :id"
+                    ),
+                    {"id": first["work_item_id"]},
+                )
+        finally:
+            await engine.dispose()
+
+    monkeypatch.setattr(
+        github_factory_review, "verify_feedback_truth", verify_with_version_change
+    )
+
+    response = _post(client, "issue_comment", payload)
+    replay = _post(client, "issue_comment", payload, delivery=str(uuid.uuid4()))
+
+    assert bumped
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "factory_queued", response.text
+    assert replay.json()["status"] == "factory_duplicate", replay.text
+    rows = _requests(number)
+    assert [row["status"] for row in rows] == ["running", "queued"]
+    assert rows[1]["objective"].splitlines()[0].endswith(f"#issuecomment-{fid}")
+    assert rows[1]["work_item_id"] == first["work_item_id"]
+
+
 def test_unlabel_cancels_queued_review_revision_before_it_can_run(
     factory: tuple[TestClient, ReviewGitHubAPI], monkeypatch: pytest.MonkeyPatch
 ) -> None:
