@@ -296,7 +296,8 @@ def test_fenced_settle_clears_cause_only_for_current_owner(make_harness) -> None
                 consumer=h.config.consumer_name,
             )
             assert await leases.release(
-                h.config.stream, h.config.consumer_group, entry_id, owner=stale.owner
+                h.config.stream, h.config.consumer_group, entry_id, owner=stale.owner,
+                resume_event_id=None,
             )
             current = await leases.acquire(
                 h.config.stream,
