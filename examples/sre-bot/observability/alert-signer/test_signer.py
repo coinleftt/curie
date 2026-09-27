@@ -9,10 +9,10 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 

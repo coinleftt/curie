@@ -1,7 +1,7 @@
 ---
 seam: CLI output (agent-facing `--json`)
 kind: CLEAN
-impls: 52 outputs behind one trait
+impls: 53 outputs behind one trait
 grade: not separately graded
 epics:
   - "#456"
@@ -13,7 +13,7 @@ order: 18
 > Part of the Curie swappable-seam catalog — see the [seam index](../../interfaces.md).
 
 <!-- BEGIN GENERATED: header (curie dev docs-lint) -->
-> **Kind:** CLEAN &nbsp;·&nbsp; **Implementations today:** 52 outputs behind one trait &nbsp;·&nbsp; **Swap-readiness grade:** not separately graded
+> **Kind:** CLEAN &nbsp;·&nbsp; **Implementations today:** 53 outputs behind one trait &nbsp;·&nbsp; **Swap-readiness grade:** not separately graded
 <!-- END GENERATED: header -->
 
 **Kind legend:** CLEAN = a real `Protocol`/typed port class · SOFT = swap via env/URL/prefix/wire, no code interface · NONE = not built yet.
@@ -65,7 +65,7 @@ This is the catalog's first **Rust** seam. It is listed here because the agent-f
 
 ## Implementations today
 
-52 `CliOutput` implementations, all in the CLI crate, grouped by owning module:
+53 `CliOutput` implementations, all in the CLI crate, grouped by owning module:
 
 - **`DryRunPlan`** (`cli/src/ui.rs`) — the generic `--dry-run` plan; JSON is
   `{"dry_run":true,"plan":[lines]}` and the human render is the same lines verbatim,
@@ -79,7 +79,7 @@ This is the catalog's first **Rust** seam. It is listed here because the agent-f
   `ListAgentsOutput`, `BumpVersionOutput`, `StatusOutput`, `SkillMessageOutput`,
   `EvalOutput`, `DeployOutput`, `AllTargetsDeployOutput`, `KillOutput`, `ResumeOutput`,
   `BudgetOutput`, `ResetThreadOutput`,
-  `DeleteOutput`, `VersionsOutput`, `MemoryOutput`, `ApprovalsOutput`,
+  `DeleteOutput`, `VersionsOutput`, `MemoryOutput`, `HookOutput`, `ApprovalsOutput`,
   `SkillApprovalsOutput`, `OverridesOutput`, `PublicationPolicyOutput`, `WorkItemsOutput`, `ChannelsOutput`,
   `ConnectorBuildOutput`. The last is
   the `curie build --plugin-dir` receipt for connector source builds (ADR-0113):
