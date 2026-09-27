@@ -1,4 +1,4 @@
-# 167. Agent and channel memory are written by the agent and limited by an inclusion list
+# 167. Agent and channel memory are written by the agent, guided by the bot definition
 
 Date: 2026-09-21
 
@@ -43,14 +43,15 @@ that turned out wrong, and forgetting one that no longer applies are the
 agent's job, taught through the tools' descriptions. The platform doesn't
 police them.
 
-**The one barrier is an inclusion list.** For each memory, a list says which
-kinds of fact may be written to it. The agent can save only facts of a listed
-kind; the platform refuses anything else. There is a default list, and an
-operator can change it per agent. This is what keeps memory from becoming
-"anything the agent wants, whenever it wants," and it is where an operator
-controls what may travel between channels: agent memory's default list is
-empty, so nothing the agent learns reaches every channel unless an operator
-allows it.
+**What to remember is guidance, not a rule the platform checks.** A short
+piece of prose says what is worth remembering in each memory and what to leave
+out. It is defined on its own, apart from the tools, and injected into the
+system prompt like the rest of the agent's instructions; there is no special
+memory section. The platform ships a default. A bundle replaces it with its
+own as part of the bot definition. This is what keeps memory from becoming
+"anything the agent wants, whenever it wants": the agent is told plainly what
+to keep, and the default tells it to keep nothing in agent memory, so a fact
+reaches every channel only if the bot definition says it should.
 
 **How memory is kept as it grows is left to the user.** The core stores facts
 and loads them at boot, within the store's existing limits. How memory is
@@ -74,41 +75,46 @@ memory on for the agent; upgrading does not turn it on.
 
 | Tool | What it does |
 |---|---|
-| `remember` | Saves a fact to agent or channel memory: a kind and a statement. Given the id of an existing fact, it replaces it. |
-| `forget` | Removes a fact by id. |
+| `remember` | Saves a new fact to agent or channel memory. |
+| `update` | Replaces an existing fact, by id. |
+| `forget` | Removes a fact, by id. |
 
-Channel memory always means the channel the current message came from; the
-tools take no channel argument. The tools' descriptions list the kinds the
-inclusion list allows for each memory, so the model sees exactly what it may
-save. The agent saves facts of the allowed kinds whenever they come up, not
-only when someone says "remember this," because its work is ongoing and its
-memory is its only durable record. A memory package can add tools of its own.
+Saving and replacing are separate tools so that replacing a fact is always a
+deliberate choice. A tool that could do both would overwrite a fact whenever
+the agent passed an id, by accident or not. Channel memory always means the
+channel the current message came from; the tools take no channel argument. The
+agent saves facts whenever the guidance says they're worth keeping, not only
+when someone says "remember this," because its work is ongoing and its memory
+is its only durable record. A memory package can add tools of its own.
 
-### The inclusion list
+### The default guidance
 
-The default applies to every agent until an operator changes it. It is an
-operator setting on the agent, like approval routes, not part of the bundle.
+The platform's default, used until a bundle provides its own, says roughly
+this:
 
-| Memory | Default kinds |
-|---|---|
-| Channel | How to work here · Decisions · Who owns what · Where things are |
-| Agent | none |
+> **Channel memory:** remember things said here that should hold next time.
+> - How to work here: instructions about how you should do your work
+>   ("Reply in threads.").
+> - Decisions: something decided that should hold going forward, with the
+>   reason ("We're dropping the weekly report; nobody reads it.").
+> - Who owns what: responsibilities, stated as roles ("Sam approves vendor
+>   contracts.").
+> - Where things are: pointers to documents, systems, trackers and locations
+>   ("The Q3 plan is in the shared drive under Planning.").
+>
+> Don't remember descriptions of people beyond their role, data and figures
+> that belong in their own system, or secrets.
+>
+> **Agent memory:** don't save anything here. It is loaded in every channel
+> you work in.
 
-| Kind | What it holds | Example |
-|---|---|---|
-| How to work here | Instructions about how the agent should do its work | "Reply in threads." |
-| Decisions | Something decided that should hold going forward, with the reason | "We're dropping the weekly report; nobody reads it." |
-| Who owns what | Responsibilities, stated as roles | "Sam approves vendor contracts." |
-| Where things are | Pointers to documents, systems, trackers, locations | "The Q3 plan is in the shared drive under Planning." |
-
-Each kind's description also says what it excludes: descriptions of a person
-beyond their role, data and figures that belong in their own system, and
-secrets.
+The exact wording is implementation. What matters is that it is prose the
+model reads, not a list the platform matches against.
 
 ### What the platform stores and loads
 
-- **One row per fact:** its id, memory, kind, statement, and provenance: who
-  stated it and when. The platform fills in the author from the message
+- **One row per fact:** its id, memory, statement, and provenance: who stated
+  it and when. The platform fills in the author from the message
   sender, because memory is used far from where it was said and the source
   keeps it accountable. The model cannot set the author.
 - **At boot,** the session gets agent memory and this channel's memory, with
@@ -123,18 +129,21 @@ secrets.
 
 - **Platform-enforced privacy rules** (classifying channels as private or
   public, blocking writes by channel type, filtering what each session sees,
-  checking replies on the way out). Rejected as over-design. The inclusion
-  list already decides what may reach agent memory, and an operator who allows
-  agent-memory kinds is choosing to let those facts travel.
+  checking replies on the way out). Rejected as over-design. The guidance
+  already tells the agent what may reach agent memory, and a bot definition
+  that allows facts there is choosing to let them travel.
 - **Choose one growth strategy for every agent.** Rejected. An index with
   detail on demand never drops a fact but loads less as memory grows;
   scheduled compaction recalls more but costs more and can drop correct facts.
   Which matters more depends on the agent, so both are optional packages
   (#3112, #3113).
-- **The bundle declares the inclusion list.** Rejected in favour of an
-  operator setting: what may be remembered is a policy for the deployment,
-  like approval routes, and keeping it off the bundle manifest avoids a frozen
-  contract change.
+- **An inclusion list the platform enforces,** matching each save against
+  allowed kinds. Rejected. There's no reliable way to match a free-text fact
+  against a kind, so the check would either refuse good saves or pass bad
+  ones. The model already decides what a fact is about; prose guidance tells
+  it what to keep.
+- **One tool that both saves and replaces.** Rejected: passing an id would
+  overwrite a fact whether or not that was meant.
 - **Save only when a person says "remember this."** Rejected: an agent whose
   only durable record is its memory would forget most of what it's told.
 - **Version history on facts.** Rejected. Replacing a fact overwrites it.
@@ -156,21 +165,23 @@ secrets.
 - Each channel's memory gets its own storage scope, using the existing
   `binding_scope` column, so each has its own size limit instead of all
   channels sharing one agent-wide limit.
-- The inclusion list is a new operator setting on the agent row, not a bundle
-  manifest change.
+- A bundle needs a way to provide its own guidance in place of the default:
+  a field or file in the bundle format, which is a frozen contract, so it gets
+  its own issue before any code, like the `boot_env` change.
 - **Email:** the channel is the mailbox binding, so every thread in a mailbox
   shares one channel memory. A mailbox that serves many outside senders mixes
-  what they said; an operator who doesn't want that can empty that mailbox
-  agent's channel list.
-- Keeping private information in its channel is the agent's judgment within
-  the inclusion list, not a platform guarantee. An operator who adds kinds to
-  agent memory accepts that a fact from any channel, including a direct
-  message, may reach every channel.
+  what they said; a bot definition for a shared mailbox can tell its agent
+  not to keep channel memory.
+- Keeping private information in its channel is the agent's judgment,
+  following the guidance, not a platform guarantee. Nothing mechanical stops a
+  fact from a direct message reaching agent memory if the model misjudges it.
+  The default guidance keeps nothing in agent memory for that reason, and a bot
+  definition that allows agent memory accepts that risk.
 - Loading every fact at boot is fine while memory is small. An agent that
   saves often will outgrow it and need one of the packages; until then, saves
   are refused at the store's limit.
 - The existing single `log` row migrates into agent memory as facts with no
-  kind restriction and no author.
+  author.
 - [ADR-0095](0095-tiered-memory-lifecycle.md) and
   [ADR-0111](0111-the-default-memory-compaction-algorithm.md) are folded into
   this one. The acceptance PR sets them to `Superseded by ADR-0167`.
@@ -179,11 +190,11 @@ secrets.
 
 1. A fact saved in one thread shows up in a new thread in the same channel,
    and not in another channel or for another agent in the same channel.
-2. A fact of a kind not on the inclusion list is refused; with memory off, no
-   tools are mounted.
-3. With the default list, nothing can be written to agent memory; after an
-   operator adds a kind, facts of that kind can.
-4. `remember` with an existing id replaces that fact, and `forget` removes it.
+2. With memory off, no tools are mounted.
+3. The default guidance is injected into the system prompt, and a bundle's own
+   guidance replaces it.
+4. `remember` adds a new fact and never replaces one; `update` replaces a fact
+   by id; `forget` removes one.
 5. A save past the store's limit is refused and reported to the agent as
    refused.
 6. A fact records its author from the message sender, and the model cannot set
