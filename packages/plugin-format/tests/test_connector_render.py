@@ -823,6 +823,31 @@ def test_a_hosted_connector_with_a_fallback_is_reachable_where_it_cannot_be_host
     }
 
 
+def test_the_fallback_derives_the_bearer_header_the_tier_now_stages() -> None:
+    # #2518: skill and local stage the Bearer secret into the runner env, so the
+    # fallback carries the same derived header `mcp_entry` does on a cluster.
+    spec = ConnectorSpec(
+        image="x:1", secrets=["GH_PAT"], unhosted_url="http://host.docker.internal:8765/mcp"
+    )
+    assert r.unhosted_mcp_entry(spec) == {
+        "type": "http",
+        "url": "http://host.docker.internal:8765/mcp",
+        "headers": {"Authorization": "Bearer ${GH_PAT}"},
+    }
+
+
+def test_the_fallback_honors_an_explicit_bearer_secret() -> None:
+    spec = ConnectorSpec(
+        image="x:1",
+        secrets=["A", "B"],
+        bearer_secret="B",
+        unhosted_url="http://host.docker.internal:8765/mcp",
+    )
+    entry = r.unhosted_mcp_entry(spec)
+    assert entry is not None
+    assert entry["headers"] == {"Authorization": "Bearer ${B}"}
+
+
 def test_a_hosted_connector_with_no_fallback_mounts_nothing_rather_than_a_dead_url() -> None:
     # None is a real answer: "declared but not exercisable here" (#1093). A URL
     # that resolves nowhere would turn that into a connection refused mid-turn.

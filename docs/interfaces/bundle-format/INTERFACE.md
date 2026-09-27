@@ -92,8 +92,9 @@ files**, each absent from a bundle that needs none, all three invisible to Claud
   runner diagnoses its absent sandbox value honestly. The author still writes no `headers:` on a
   hosted connector (`connectors.hosted_has_headers`), and `cluster deploy` binds only a plain
   string Bearer name into the sandbox alongside any explicit `--secret` so the runner can expand
-  the placeholder at boot and then drop the name from the process env (#2503, #2559). The `url`
-  fallback used by tiers below cluster derives no header and remains a follow-up. A hosted
+  the placeholder at boot and then drop the name from the process env (#2503, #2559). `skill up`
+  stages the same name into the runner env and `local deploy` resolves it onto the agent record
+  with no `--secret`, so the `unhosted_url` fallback derives the same header (#2518). A hosted
   connector with several
   secrets and no `bearer_secret` is `connectors.bearer_secret_required`. Validated by `packages/plugin-format/src/plugin_format/validate.py::_validate_connectors`,
   which emits `connectors.*` codes (`connectors.not_object`, `connectors.ambiguous`,
