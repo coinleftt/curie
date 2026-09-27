@@ -50,7 +50,10 @@
           "type": "string"
         },
         "wait_deadline": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "started_at": {
           "type": [
@@ -253,7 +256,7 @@
         },
         "state": {
           "type": "string",
-          "description": "API-derived state, rendered verbatim. Known values: waiting, running, cancellation_requested, cancelled, expired, failed, awaiting_approval, publishing, published, completed_unpublished; clients must tolerate new values."
+          "description": "API-derived state, rendered verbatim. Known values: queued, waiting, running, cancellation_requested, cancelled, expired, failed, awaiting_approval, publishing, published, completed_unpublished; clients must tolerate new values."
         },
         "actionable_cause": {
           "type": "string"

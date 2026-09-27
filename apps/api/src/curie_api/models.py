@@ -689,8 +689,12 @@ class ExecutionRequest(Base):
         CheckConstraint("sequence > 0", name="execution_requests_sequence_ck"),
         CheckConstraint("version >= 1", name="execution_requests_version_ck"),
         CheckConstraint(
+            "status IN ('queued', 'cancelled') OR wait_deadline IS NOT NULL",
+            name="execution_requests_wait_deadline_ck",
+        ),
+        CheckConstraint(
             "status IS NOT NULL AND status IN "
-            "('waiting', 'running', 'cancellation_requested', 'completed', "
+            "('queued', 'waiting', 'running', 'cancellation_requested', 'completed', "
             "'failed', 'expired', 'cancelled')",
             name="execution_requests_status_ck",
         ),
@@ -712,7 +716,10 @@ class ExecutionRequest(Base):
             name="execution_requests_deadline_ck",
         ),
         CheckConstraint(
-            "((status = 'waiting' AND started_at IS NULL "
+            "((status = 'queued' AND wait_deadline IS NULL AND started_at IS NULL "
+            "AND execution_deadline IS NULL AND terminal_at IS NULL "
+            "AND terminal_cause IS NULL AND termination_observation IS NULL) "
+            "OR (status = 'waiting' AND wait_deadline IS NOT NULL AND started_at IS NULL "
             "AND execution_deadline IS NULL AND terminal_at IS NULL "
             "AND terminal_cause IS NULL AND termination_observation IS NULL) "
             "OR (status = 'running' AND started_at IS NOT NULL "
@@ -743,7 +750,7 @@ class ExecutionRequest(Base):
             "AND termination_observation IS NOT NULL))) "
             "OR (status = 'cancelled' AND terminal_at IS NOT NULL "
             "AND terminal_cause IS NOT NULL "
-            "AND terminal_cause = 'issue_cancelled' AND "
+            "AND terminal_cause IN ('issue_cancelled', 'lineage_closed') AND "
             "((started_at IS NULL AND execution_deadline IS NULL "
             "AND termination_observation IS NULL) OR "
             "(started_at IS NOT NULL AND execution_deadline IS NOT NULL "
@@ -815,6 +822,12 @@ class ExecutionRequest(Base):
             postgresql_where=text("status = 'waiting'"),
         ),
         Index(
+            "ix_execution_requests_queued",
+            "work_item_id",
+            "sequence",
+            postgresql_where=text("status = 'queued'"),
+        ),
+        Index(
             "ix_execution_requests_runtime_liveness",
             "runtime_heartbeat_expires_at",
             postgresql_where=text(
@@ -829,7 +842,7 @@ class ExecutionRequest(Base):
     )
     sequence: Mapped[int]
     status: Mapped[str] = mapped_column(default="waiting", server_default="waiting")
-    wait_deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    wait_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), default=None
     )
