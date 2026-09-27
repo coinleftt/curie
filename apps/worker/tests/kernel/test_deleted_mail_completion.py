@@ -321,6 +321,7 @@ def test_fenced_settle_clears_cause_only_for_current_owner(make_harness) -> None
                 entry_id=entry_id,
                 owner=stale.owner,
                 generation=stale.generation,
+                marker_value="1",
             ) is None
             stored = await markers.read_completion(event_id)
             assert stored is not None
@@ -337,6 +338,7 @@ def test_fenced_settle_clears_cause_only_for_current_owner(make_harness) -> None
                 entry_id=entry_id,
                 owner=current.owner,
                 generation=current.generation,
+                marker_value="1",
             )
             assert new_generation is not None and new_generation != first_generation
             stored = await markers.read_completion(event_id)
