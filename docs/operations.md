@@ -30,6 +30,26 @@ API server typically binds loopback, which can make it unreachable from a
 pod; if `cluster message` can't auto-detect a pod-reachable host, pass
 `--listen-host` explicitly (see `cli/README.md`).
 
+**On Apple Silicon (arm64)**, two caveats:
+
+- The AVX preflight is x86-only. `preflights.avxCheck` greps the node's
+  `/proc/cpuinfo` for the `avx` flag, which no arm64 CPU reports, so the
+  check fails on every arm64 node regardless of tool. Disable it with
+  `curie cluster up --set preflights.avxCheck.enabled=false`. The chart
+  README's other remedy for a failing AVX check -- pinning an SSE4.2-safe
+  ClickHouse tag -- is no better here: those tags predate the current
+  Langfuse migration set and cannot apply it (see
+  `charts/curie/README.md`).
+- Prefer **kind** over **minikube** when the full stack matters. On
+  minikube's docker driver, ClickHouse has been observed crash-looping
+  (`std::terminate` in `MergeTreeData::loadOutdatedDataParts`, signal 5)
+  while every other component reports healthy and `cluster up` still
+  reports success -- a silent failure. The crash did not reproduce in a
+  bare `docker run` of the same image, config, and resource limits, which
+  points at minikube's node setup rather than the chart: the same chart,
+  version, and overrides converge cleanly on kind, with real traces and
+  evals working.
+
 **For production**, you'll likely point at a managed or self-hosted cluster
 instead. Name it on every `cluster` command with `--context` (see below), so a
 stale kubeconfig current-context cannot send a command at the wrong cluster:
