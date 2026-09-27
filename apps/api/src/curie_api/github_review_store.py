@@ -14,13 +14,16 @@ import redis.asyncio as redis
 from aci_protocol import STREAM_PAYLOAD_FIELD, QueuedTurn, ReplyHandle, TurnSource
 from channel_protocol import scoped_conversation_id
 from curie_telemetry import TRACEPARENT_STREAM_FIELD, canonicalize_traceparent
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.concurrency import run_in_threadpool
 
 from . import crud
 from .config import Settings
 from .delivery import enqueue_owned, take_backlog_slot
+from .factory_notices import _find_marker
+from .github_app import GitHubAppError, GitHubInstallationRefused, credentials_for
 from .github_review_audit import settle_review_delivery
 from .github_review_events import (
     FeedbackHeld,
@@ -28,8 +31,8 @@ from .github_review_events import (
     FeedbackUnavailable,
     UnverifiedFeedback,
 )
-from .github_review_terminal import read_review_dead_letter, worker_event_is_terminal
-from .github_review_truth import BoundReviewLineage, verify_feedback_truth
+from .github_review_terminal import read_review_dead_letter, worker_event_terminal_outcome
+from .github_review_truth import BoundReviewLineage, github_headers, verify_feedback_truth
 from .models import (
     AgentChannel,
     Deployment,
@@ -40,11 +43,13 @@ from .models import (
     ThreadPublicationLineage,
     ThreadWorkspace,
 )
+from .repo_full_name import repo_url_path
 from .schemas import BUILTIN_CLUSTER_MESSAGE_ADAPTER, ReviewRevisionReserve
 from .workspace_policy import repository_is_allowed
 
 logger = logging.getLogger(__name__)
 _MAX_ENQUEUE_ATTEMPTS = 8
+_WORKER_DONE_RETENTION_S = 604800
 
 
 @dataclass(frozen=True)
@@ -505,6 +510,7 @@ class GitHubReviewReconciler:
         self._valkey = valkey
         self._settings = settings
         self._client = client
+        self._capacity_notice_cursor: tuple[datetime, str] | None = None
 
     async def replay_held(self, *, repository_id: int, pr_number: int) -> int:
         """Admit and enqueue one PR's held feedback right after identity lands."""
@@ -635,7 +641,8 @@ class GitHubReviewReconciler:
             candidates = list(await session.scalars(statement))
         settled = 0
         for candidate in candidates:
-            terminal = await worker_event_is_terminal(self._valkey, self._settings, candidate)
+            terminal = await worker_event_terminal_outcome(self._valkey, self._settings, candidate)
+            mirrored_capacity = False
             async with self._sessionmaker() as session, session.begin():
                 row = await session.scalar(
                     select(GitHubReviewFeedback).where(
@@ -646,7 +653,7 @@ class GitHubReviewReconciler:
                 if row is None:
                     continue
                 dead_lettered = False
-                if not terminal and row.stream_id is not None:
+                if terminal is None and row.stream_id is not None:
                     dead_lettered, cursor = await read_review_dead_letter(
                         self._valkey, self._settings, stream_id=row.stream_id,
                         turn=row.turn, cursor=row.terminal_scan_cursor,
@@ -654,7 +661,7 @@ class GitHubReviewReconciler:
                     if cursor != row.terminal_scan_cursor:
                         row.terminal_scan_cursor = cursor
                         row.version += 1
-                if not terminal and not dead_lettered:
+                if terminal is None and not dead_lettered:
                     continue
                 consumed = False
                 if row.reservation_id is not None:
@@ -679,6 +686,9 @@ class GitHubReviewReconciler:
                     # writer and must never be cancelled by this observer.
                 if dead_lettered:
                     row.status, row.error_code = "dead_lettered", "delivery_dead_lettered"
+                elif terminal == "history_capacity" and not consumed:
+                    row.status, row.error_code = "refused", "history_capacity"
+                    row.notice_marker = uuid.uuid4()
                 else:
                     row.status = "settled" if consumed or not row.error_code else "refused"
                     if consumed:
@@ -687,7 +697,147 @@ class GitHubReviewReconciler:
                         row.error_code = None
                 row.version += 1
                 settled += 1
+                mirrored_capacity = terminal == "history_capacity"
+            if mirrored_capacity:
+                # The worker retains this marker without expiry until SQL has
+                # committed the failure, so a slow observer cannot lose it.
+                await self._valkey.expire(
+                    f"{self._settings.worker_key_prefix}:done:{candidate}",
+                    _WORKER_DONE_RETENTION_S,
+                )
+        await self._retry_history_capacity_notices(event_id)
         return settled
+
+    async def _retry_history_capacity_notices(self, event_id: str | None) -> None:
+        """Repair marker TTLs and deliver refusals left by earlier processes."""
+        async with self._sessionmaker() as session:
+            statement = select(
+                GitHubReviewFeedback.event_id,
+                GitHubReviewFeedback.created_at,
+                GitHubReviewFeedback.error_code,
+            ).where(
+                GitHubReviewFeedback.status == "refused",
+                GitHubReviewFeedback.error_code.in_(
+                    ("history_capacity", "history_capacity_notified")
+                ),
+            ).order_by(GitHubReviewFeedback.created_at, GitHubReviewFeedback.event_id).limit(100)
+            if event_id is not None:
+                statement = statement.where(GitHubReviewFeedback.event_id == event_id)
+            elif self._capacity_notice_cursor is not None:
+                statement = statement.where(
+                    tuple_(GitHubReviewFeedback.created_at, GitHubReviewFeedback.event_id)
+                    > self._capacity_notice_cursor
+                )
+            candidates = list((await session.execute(statement)).all())
+        if event_id is None:
+            self._capacity_notice_cursor = (
+                (candidates[-1][1], candidates[-1][0]) if len(candidates) == 100 else None
+            )
+        for candidate, _created_at, error_code in candidates:
+            key = f"{self._settings.worker_key_prefix}:done:{candidate}"
+            async with self._valkey.pipeline(transaction=False) as pipe:
+                pipe.get(key)
+                pipe.ttl(key)
+                marker, ttl = await pipe.execute()
+            if marker in ("history_capacity", b"history_capacity") and ttl == -1:
+                await self._valkey.expire(key, _WORKER_DONE_RETENTION_S)
+            if error_code != "history_capacity":
+                continue
+            async with self._sessionmaker() as session, session.begin():
+                row = await session.scalar(
+                    select(GitHubReviewFeedback).where(
+                        GitHubReviewFeedback.event_id == candidate,
+                        GitHubReviewFeedback.status == "refused",
+                        GitHubReviewFeedback.error_code == "history_capacity",
+                    ).with_for_update(skip_locked=True)
+                )
+                if row is None:
+                    continue
+                if await self._post_history_capacity_notice(session, row):
+                    row.error_code = "history_capacity_notified"
+                    row.version += 1
+
+    async def _post_history_capacity_notice(
+        self, session: AsyncSession, row: GitHubReviewFeedback
+    ) -> bool:
+        """Use the captured PR identity and search all pages before posting."""
+        if row.lineage_id is None:
+            return False
+        lineage = await session.get(ThreadPublicationLineage, row.lineage_id)
+        if lineage is None or lineage.pr_number is None or lineage.github_installation_id is None:
+            return False
+        try:
+            feedback = feedback_from_row(row)
+        except FeedbackIgnored:
+            return False
+        if (
+            feedback.repo_full_name.casefold() != lineage.repo_full_name.casefold()
+            or feedback.pr_number != lineage.pr_number
+            or feedback.repository_id != lineage.github_repository_id
+            or feedback.installation_id != lineage.github_installation_id
+        ):
+            return False
+        try:
+            token = await run_in_threadpool(
+                credentials_for(self._settings).token_for_verified_installation,
+                lineage.repo_full_name,
+                lineage.github_installation_id,
+            )
+        except (GitHubAppError, GitHubInstallationRefused, ValueError):
+            return False
+        api = self._settings.github_api_url.rstrip("/")
+        comments_path = (
+            f"/repos/{repo_url_path(lineage.repo_full_name)}"
+            f"/issues/{lineage.pr_number}/comments"
+        )
+        headers = github_headers(token)
+        assert row.notice_marker is not None
+        marker = f"<!-- curie-review-history-capacity:{row.notice_marker} -->"
+        scan = await _find_marker(
+            self._client, api, comments_path, headers, marker,
+            start_page=row.notice_scan_page,
+        )
+        if scan.comment_id is not None:
+            return True
+        if scan.refusal is not None or scan.unavailable:
+            return False
+        if scan.next_page is not None:
+            row.notice_scan_page = scan.next_page
+            row.version += 1
+            return False
+        body = (
+            "Review could not continue because conversation history capacity was exceeded. "
+            "Work may have happened. Inspect the result and retry.\n"
+            f"In response to {feedback.url}\n"
+            f"Review event: {row.event_id}\n"
+            f"{marker}"
+        )
+        try:
+            response = await self._client.post(
+                f"{api}{comments_path}",
+                headers=headers,
+                json={"body": body},
+                follow_redirects=False,
+            )
+        except httpx.HTTPError:
+            row.notice_scan_page = 1
+            row.version += 1
+            return False
+        if response.status_code not in (200, 201):
+            row.notice_scan_page = 1
+            row.version += 1
+            return False
+        try:
+            payload = response.json()
+        except ValueError:
+            row.notice_scan_page = 1
+            row.version += 1
+            return False
+        if not isinstance(payload, dict) or type(payload.get("id")) is not int:
+            row.notice_scan_page = 1
+            row.version += 1
+            return False
+        return True
 
     async def run_forever(self) -> None:
         while True:
