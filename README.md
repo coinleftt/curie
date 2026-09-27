@@ -3,6 +3,7 @@
 [![CI](https://github.com/curie-eng/curie/actions/workflows/ci.yaml/badge.svg)](https://github.com/curie-eng/curie/actions/workflows/ci.yaml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/curie-eng/curie)](https://github.com/curie-eng/curie/releases)
+[![Docs](https://img.shields.io/badge/Docs-index-blue.svg)](docs/README.md)
 
 Open-source (Apache 2.0), self-hostable delivery platform for production AI agents. Connect
 Slack — the first channel it speaks, with email and Teams next — author a Claude-Code-format
