@@ -182,6 +182,10 @@ logger = logging.getLogger(__name__)
 # the runner package.
 _PUBLISH_PROVENANCE = ("permission", PLATFORM_PUBLISH_TOOL_NAME)
 _PUBLICATION_EXPIRES_IN_SECONDS = 24 * 60 * 60
+# Session gates use the same 24 hour deadline as publication (#1938).
+# Omitting expires_in_seconds stores expires_at NULL, and the sweeper
+# only selects rows that have one, so a request nobody resolves never wakes.
+_SESSION_APPROVAL_EXPIRES_IN_SECONDS = 24 * 60 * 60
 _ATTACHMENT_HANDOFF_PROBE_TIMEOUT_S = 5.0
 _ACTIVE_ATTACHMENT_REPLY = (
     "I cannot add a file while the current reply is still running. "
@@ -6264,6 +6268,7 @@ class Kernel:
                         # validation; ValidationError below is the rejection path.
                         gate_kind=cast("GateKind | None", outcome.approval_gate_kind),
                         granted_tool=outcome.approval_granted_tool,
+                        expires_in_seconds=_SESSION_APPROVAL_EXPIRES_IN_SECONDS,
                     )
                 )
         except WorkspaceSelectionRefused as exc:
