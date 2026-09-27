@@ -2229,6 +2229,8 @@ def test_ci_detail_adds_a_failing_actions_log_to_the_fix_report(
         published_at=datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
         execution_deadline=datetime(2026, 9, 24, 12, 30, tzinfo=UTC),
         ci_wait_seconds=1200,
+        changed_paths=[],
+        sandbox_unavailable=False,
     ).kind == "failing"
     prompt = factory_ci.continuation_text(
         f"https://github.com/{REPO}/issues/9101", PR_URL, HEAD_SHA, 2, detail
@@ -2372,6 +2374,8 @@ def test_large_actions_log_preserves_a_bounded_diagnostic_tail(
         published_at=datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
         execution_deadline=datetime(2026, 9, 24, 12, 30, tzinfo=UTC),
         ci_wait_seconds=1200,
+        changed_paths=[],
+        sandbox_unavailable=False,
     ).kind == "failing"
     prompt = factory_ci.continuation_text(
         f"https://github.com/{REPO}/issues/9101", PR_URL, HEAD_SHA, 2, detail
@@ -2454,6 +2458,8 @@ def test_actions_log_over_eight_mib_is_optional_enrichment_failure(
         published_at=datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
         execution_deadline=datetime(2026, 9, 24, 12, 30, tzinfo=UTC),
         ci_wait_seconds=1200,
+        changed_paths=[],
+        sandbox_unavailable=False,
     ).kind == "failing"
     prompt = factory_ci.continuation_text(
         f"https://github.com/{REPO}/issues/9101", PR_URL, HEAD_SHA, 2, detail
