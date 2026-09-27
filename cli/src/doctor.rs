@@ -4567,11 +4567,17 @@ esac
             c.detail
         );
         assert!(
+            c.detail.contains("cluster eval"),
+            "point at cluster eval as well: {}",
+            c.detail
+        );
+        assert!(
             c.fix.is_none(),
             "do not send the operator to mint Slack: {c:?}"
         );
         let s = summary(&checks);
         assert!(s.contains("cluster message"), "{s}");
+        assert!(s.contains("cluster eval"), "{s}");
         assert!(s.contains("Slack is not wired"), "{s}");
         assert!(
             !s.contains("no way to be reached"),

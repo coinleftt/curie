@@ -7387,7 +7387,7 @@ mod tests {
     }
 
     #[test]
-    fn cluster_eval_dry_run_plan_lists_the_valkey_forward_and_stub() {
+    fn cluster_eval_dry_run_plan_lists_the_relay_even_with_a_channel() {
         let lines = eval_dry_run_lines(&eval_opts(false, Some("C1")), "smoke", 2)
             .expect("eval dry-run plan");
         assert!(
@@ -7402,16 +7402,26 @@ mod tests {
                 .any(|l| l == "kubectl -n curie port-forward svc/curie-valkey 56381:6379"),
             "{lines:?}"
         );
-        // Explicit channel -> no api forward.
-        assert!(
-            !lines.iter().any(|l| l.contains("svc/curie-api")),
-            "explicit channel needs no api forward: {lines:?}"
-        );
+        // An explicit channel still polls the relay, so the API forward stays.
         assert!(
             lines
                 .iter()
-                .any(|l| l.starts_with("stub advertised at http://")),
+                .any(|l| l == "kubectl -n curie port-forward svc/curie-api 8123:8000"),
+            "explicit channel still needs the relay api forward: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| {
+                l == "poll replies at http://127.0.0.1:8123/cluster-message-replies/<uuid-v4>"
+            }),
             "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("no reply endpoint")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().all(|l| !l.contains("stub advertised")),
+            "cluster eval must not advertise a Slack stub: {lines:?}"
         );
     }
 
