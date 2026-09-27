@@ -795,6 +795,7 @@ def _constraint_statuses() -> list[str]:
 
 
 PILLS = {
+    "queued": ("QUEUED", "#9a6700", False),
     "waiting": ("QUEUED", "#9a6700", False),
     "running": ("RUNNING", "#2f81f7", True),
     "cancellation_requested": ("STOPPING", "#bc4c00", True),

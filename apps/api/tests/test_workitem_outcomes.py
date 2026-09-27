@@ -15,7 +15,7 @@ import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -30,11 +30,13 @@ from curie_api.github_app import (
     GitHubInstallationRefused,
 )
 from curie_api.main import create_app
+from curie_api.models import ExecutionRequest, WorkItem
 from curie_api.publication_authority import VerifiedPublicationIdentity
 from curie_api.schemas import ApprovalRequest, PublicationLineageAdvance
 from curie_api.workitem_dispatch import (
     acquire,
     admit,
+    admit_revision,
     cancel,
     claim_termination,
     defer,
@@ -42,6 +44,7 @@ from curie_api.workitem_dispatch import (
     record_termination,
     start,
 )
+from curie_api.workitem_outcomes import derive_outcome
 from curie_test_support.valkey import connect_or_skip
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -241,6 +244,19 @@ def _admit(facts: SimpleNamespace) -> SimpleNamespace:
         return SimpleNamespace(
             work_item_id=admitted.work_item.id,
             work_item_version=admitted.work_item.version,
+            request_id=facts.request_id,
+        )
+
+    return with_session(body)
+
+
+def _admit_revision(facts: SimpleNamespace) -> SimpleNamespace:
+    async def body(session: AsyncSession) -> SimpleNamespace:
+        admitted = await admit_revision(session, facts)
+        assert admitted.request is not None, admitted
+        assert admitted.request.status == "queued", admitted
+        return SimpleNamespace(
+            work_item_id=admitted.work_item.id,
             request_id=facts.request_id,
         )
 
@@ -692,6 +708,39 @@ def test_pending_publication_approval_is_awaiting_approval(
     _assert_common(body)
 
 
+def test_queued_revision_preserves_active_approval_and_objective(
+    stack: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _agent(stack, auth_headers)
+    active = _completed(stack, agent)
+    _publish(stack, agent["deployment_id"])
+    revision_objective = "Revise the pull request after the current run"
+    revision = _admit_revision(
+        _facts(agent["agent_id"], objective=revision_objective, requester="U0REQUEST2")
+    )
+    assert revision.work_item_id == active.work_item_id
+
+    body = _detail(stack, auth_headers, active.work_item_id)
+    listed = stack.get("/work-items", headers=auth_headers)
+    assert listed.status_code == 200, listed.text
+    listed_item = next(
+        item for item in listed.json()["items"] if item["id"] == str(active.work_item_id)
+    )
+
+    for view in (body, listed_item):
+        assert view["state"] == "awaiting_approval"
+        assert view["objective"] == OBJECTIVE
+        assert view["requester"] == REQUESTER
+        assert "approval" in view["actionable_cause"].lower()
+        assert view["publication"]["approval_status"] == "pending"
+        assert [request["status"] for request in view["requests"]] == [
+            "running",
+            "queued",
+        ]
+        assert [request["sequence"] for request in view["requests"]] == [1, 2]
+    _assert_common(body)
+
+
 def test_pending_tool_approval_on_the_reply_tuple_is_awaiting_approval(
     stack: TestClient, auth_headers: dict[str, str]
 ) -> None:
@@ -951,6 +1000,106 @@ def test_readmitted_item_running_again_reports_running_and_keeps_the_pr(
         r["sequence"] for r in body["requests"]
     )
     assert [r["status"] for r in body["requests"]] == ["completed", "running"]
+
+
+def test_closed_lineage_cancellation_names_the_closed_lineage(
+    stack: TestClient, auth_headers: dict[str, str]
+) -> None:
+    agent = _agent(stack, auth_headers)
+    active = _completed(stack, agent)
+    publication = _publish(stack, agent["deployment_id"])
+    _resolve(stack, auth_headers, publication["approval_id"])
+    _open_pr(stack, publication["id"])
+    revision = _admit_revision(
+        _facts(
+            agent["agent_id"],
+            objective=f"{PR_URL}#issuecomment-1\nRevise after review feedback",
+        )
+    )
+    assert revision.work_item_id == active.work_item_id
+    _complete(active)
+    _execute(
+        "UPDATE curie.thread_publication_lineages SET status = 'closed', "
+        "version = version + 1 WHERE id = :id",
+        {"id": uuid.UUID(publication["lineage_id"])},
+    )
+
+    async def promote(session: AsyncSession) -> None:
+        outcome = await workitems.admit_next_revision(
+            session,
+            work_item_id=active.work_item_id,
+            wait_deadline=datetime.now(UTC) + timedelta(minutes=10),
+        )
+        assert isinstance(outcome, workitems.WorkItemOutcome), outcome
+        assert outcome.request is not None
+        assert outcome.request.id == revision.request_id
+        assert outcome.request.status == "cancelled"
+        assert outcome.request.terminal_cause == "lineage_closed"
+
+    with_session(promote)
+
+    body = _detail(stack, auth_headers, active.work_item_id)
+    assert body["state"] == "published"
+    assert body["objective"] == OBJECTIVE
+    assert body["requester"] == REQUESTER
+    assert body["pr"] == {"number": PR_NUMBER, "url": PR_URL, "status": "closed"}
+    assert body["cancelled_at"] is None
+    assert [request["status"] for request in body["requests"]] == [
+        "completed",
+        "cancelled",
+    ]
+    assert body["requests"][-1]["terminal_cause"] == "lineage_closed"
+    _assert_common(body)
+
+
+def test_only_closed_lineage_request_names_the_cancellation_cause() -> None:
+    now = datetime.now(UTC)
+    work_item_id = uuid.uuid4()
+    item = WorkItem(
+        id=work_item_id,
+        github_repository_id=101,
+        github_issue_number=2577,
+        github_installation_id=202,
+        agent_id=uuid.uuid4(),
+        repo_full_name=REPO,
+        conversation_id=WIRE_CONVERSATION,
+        cancelled_at=None,
+        created_at=now,
+        updated_at=now,
+    )
+    request = ExecutionRequest(
+        id=uuid.uuid4(),
+        work_item_id=work_item_id,
+        sequence=1,
+        status="cancelled",
+        wait_deadline=None,
+        started_at=None,
+        execution_deadline=None,
+        terminal_at=now,
+        terminal_cause="lineage_closed",
+        termination_observation=None,
+        created_at=now,
+        capacity_deferrals=0,
+        last_deferral_reason=None,
+        objective=f"{PR_URL}#issuecomment-1\nRevise after review feedback",
+        requester=REQUESTER,
+    )
+
+    outcome = derive_outcome(
+        item,
+        [request],
+        lineage=None,
+        publication=None,
+        approval=None,
+        pending_turn_approval=False,
+        now=now,
+        issue_base="https://github.com",
+    )
+
+    assert outcome.state == "cancelled"
+    assert "pull request closed" in outcome.actionable_cause
+    assert "issue label" not in outcome.actionable_cause
+    assert outcome.requests[0].terminal_cause == "lineage_closed"
 
 
 def test_sticky_cancel_with_retained_pr_reports_cancelled_and_pr(

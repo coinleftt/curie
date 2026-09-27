@@ -41,7 +41,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 ALEMBIC_DIR = Path(__file__).resolve().parents[1] / "alembic"
 CONTRACT = "0041"
-REVIEW_SCHEMA_MIN = "0060"
+REVIEW_SCHEMA_MIN = "0063"
 PREV = "0040"
 
 
@@ -96,7 +96,7 @@ def test_released_application_declares_a_machine_readable_window() -> None:
     kinds = load_kinds()
     assert kinds[CONTRACT] == KIND_CONTRACT
     assert kinds[REVIEW_SCHEMA_MIN] == KIND_CONTRACT
-    assert kinds[HEAD] == KIND_EXPAND
+    assert kinds[HEAD] == KIND_CONTRACT
     assert kinds[PREV] == KIND_EXPAND
     assert kinds["0016"] == KIND_IRREVERSIBLE
 
