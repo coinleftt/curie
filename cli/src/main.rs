@@ -2821,8 +2821,8 @@ enum ClusterAction {
         /// `cluster message`.
         #[arg(long, default_value_t = 0)]
         api_local_port: u16,
-        /// Platform API key for the default-channel lookup. Omit to read the
-        /// release's own key from its chart Secret.
+        /// Platform API key. It authenticates the relay poll and a missing-channel
+        /// lookup. Omit to read the release's own key from its chart Secret.
         #[arg(long, env = "CURIE_API_KEY", hide_env_values = true, value_parser = message::cluster_api_key)]
         api_key: Option<String>,
         /// Synthetic Slack user id for the enqueued events.

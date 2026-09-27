@@ -1006,6 +1006,16 @@ fn cluster_eval_grades_through_the_message_relay_without_a_stub_or_rollout() {
         conversation_id.starts_with("eval:"),
         "eval isolation prefix missing: {conversation_id}"
     );
+    let resets = state["sadd_members"].as_array().expect("thread reset SADD");
+    assert!(!resets.is_empty(), "eval must SADD the scoped thread key");
+    assert!(
+        resets.iter().all(|member| {
+            member
+                .as_str()
+                .is_some_and(|value| value.starts_with("slack:C0EXAMPLE1:eval%3A"))
+        }),
+        "reset must be the scoped eval thread key, not the bare conversation id: {resets:?}"
+    );
     assert_eq!(
         state["xack_commands"],
         serde_json::json!([]),
