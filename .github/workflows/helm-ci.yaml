@@ -536,6 +536,14 @@ jobs:
           set -euo pipefail
           bash charts/curie/ci/sandbox-emptydir-sizelimit-assertions.sh
 
+      # Prove the in-chart Valkey renders a maxmemory ceiling at 75% of its
+      # container memory limit with noeviction, so a full broker refuses writes
+      # instead of being OOMKilled (issue #3350).
+      - name: helm render assertions (valkey maxmemory)
+        run: |
+          set -euo pipefail
+          bash charts/curie/ci/valkey-maxmemory-assertions.sh
+
       # Prove every bundle-fetch init image rendered on the SandboxTemplate is
       # also a container image on the runner-prewarm DaemonSet, so a fresh or
       # image-GCed node cannot cold-pull amazon/aws-cli (~418MB) inside the
