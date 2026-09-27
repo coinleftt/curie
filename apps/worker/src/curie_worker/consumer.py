@@ -839,9 +839,8 @@ class Consumer(StreamConsumer):
         """Post the not-started edit when the broker entry itself is gone."""
         try:
             qevent = from_stream_fields(fields)
-            await self._kernel.notify_broker_entry_vanished(
-                qevent, lease=self._held_leases.get(entry_id)
-            )
+            lease = self._held_leases.get(entry_id) or self._notice_lease.get(entry_id)
+            await self._kernel.notify_broker_entry_vanished(qevent, lease=lease)
         except Exception:
             logger.exception(
                 "could not post the vanished-entry notice for entry %s",
