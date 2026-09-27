@@ -15,6 +15,7 @@ from curie_mail_adapter.adapter import MailAdapter
 from curie_mail_adapter.config import MailAdapterConfig
 from curie_mail_adapter.egress import make_server
 from curie_worker.consumer import Consumer
+from curie_worker.delivery_lease import DeliveryLeaseStore
 from curie_worker.markers import Markers
 from curie_worker.reply_sink import HttpReplyAdapter
 
@@ -85,7 +86,12 @@ def test_admitted_mail_completion_dead_letters_deleted_thread_only(
                     completion_sweep_grace_s=0.0,
                     sink=sink,
                 ) as h:
-                    consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+                    consumer = Consumer(
+                        redis=h.async_redis,
+                        kernel=h.kernel,
+                        config=h.config,
+                        leases=DeliveryLeaseStore(h.async_redis, h.config),
+                    )
                     await consumer.ensure_group()
                     qe = _qevent(event_id="deleted-completion").model_copy(
                         update={

@@ -1700,6 +1700,161 @@ export const commandManifest = {
           "name": "versions"
         },
         {
+          "about": "Manage an agent's hook configuration and signing secret",
+          "hidden": false,
+          "name": "hooks",
+          "subcommands": [
+            {
+              "about": "Show an agent's hook partition and source binding maps",
+              "args": [
+                {
+                  "global": false,
+                  "help": "Agent name or id",
+                  "id": "agent",
+                  "positional": true,
+                  "required": true
+                },
+                {
+                  "default_values": [
+                    "http://localhost:28000"
+                  ],
+                  "env": "CURIE_API_URL",
+                  "global": false,
+                  "id": "api_url",
+                  "long": "api-url",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "default_values": [
+                    "curie-dev-key"
+                  ],
+                  "env": "CURIE_API_KEY",
+                  "global": false,
+                  "id": "api_key",
+                  "long": "api-key",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "global": false,
+                  "id": "dry_run",
+                  "long": "dry-run",
+                  "positional": false,
+                  "possible_values": [
+                    "true",
+                    "false"
+                  ],
+                  "required": false
+                }
+              ],
+              "hidden": false,
+              "name": "show"
+            },
+            {
+              "about": "Replace one or both hook maps from a JSON file. An empty map clears it",
+              "args": [
+                {
+                  "global": false,
+                  "help": "Agent name or id",
+                  "id": "agent",
+                  "positional": true,
+                  "required": true
+                },
+                {
+                  "default_values": [
+                    "http://localhost:28000"
+                  ],
+                  "env": "CURIE_API_URL",
+                  "global": false,
+                  "id": "api_url",
+                  "long": "api-url",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "default_values": [
+                    "curie-dev-key"
+                  ],
+                  "env": "CURIE_API_KEY",
+                  "global": false,
+                  "id": "api_key",
+                  "long": "api-key",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "global": false,
+                  "id": "dry_run",
+                  "long": "dry-run",
+                  "positional": false,
+                  "possible_values": [
+                    "true",
+                    "false"
+                  ],
+                  "required": false
+                },
+                {
+                  "global": false,
+                  "id": "file",
+                  "long": "file",
+                  "positional": false,
+                  "required": true
+                }
+              ],
+              "hidden": false,
+              "name": "configure"
+            },
+            {
+              "about": "Read the derived hook signing secret for an agent",
+              "args": [
+                {
+                  "global": false,
+                  "help": "Agent name or id",
+                  "id": "agent",
+                  "positional": true,
+                  "required": true
+                },
+                {
+                  "default_values": [
+                    "http://localhost:28000"
+                  ],
+                  "env": "CURIE_API_URL",
+                  "global": false,
+                  "id": "api_url",
+                  "long": "api-url",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "default_values": [
+                    "curie-dev-key"
+                  ],
+                  "env": "CURIE_API_KEY",
+                  "global": false,
+                  "id": "api_key",
+                  "long": "api-key",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "global": false,
+                  "id": "dry_run",
+                  "long": "dry-run",
+                  "positional": false,
+                  "possible_values": [
+                    "true",
+                    "false"
+                  ],
+                  "required": false
+                }
+              ],
+              "hidden": false,
+              "name": "secret"
+            }
+          ]
+        },
+        {
           "about": "Show what an agent has learned (its memory log; `GET /agents/{id}/memory`). `--add <content>` seeds an operator-authored record; a fresh session is required before it is injected at boot",
           "args": [
             {
@@ -5318,6 +5473,218 @@ export const commandManifest = {
           "name": "versions"
         },
         {
+          "about": "Manage an agent's hook configuration and signing secret",
+          "hidden": false,
+          "name": "hooks",
+          "subcommands": [
+            {
+              "about": "Show an agent's hook partition and source binding maps",
+              "args": [
+                {
+                  "global": false,
+                  "help": "Agent name or id",
+                  "id": "agent",
+                  "positional": true,
+                  "required": true
+                },
+                {
+                  "env": "CURIE_API_URL",
+                  "global": false,
+                  "help": "Platform API base URL. Omit to self-plumb a loopback tunnel to the release API",
+                  "id": "api_url",
+                  "long": "api-url",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "env": "CURIE_API_KEY",
+                  "global": false,
+                  "help": "Platform API key. Omit to read the release's `api.apiKey` from its Secret",
+                  "id": "api_key",
+                  "long": "api-key",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "default_values": [
+                    "curie"
+                  ],
+                  "env": "CURIE_NAMESPACE",
+                  "global": false,
+                  "help": "Kubernetes namespace of the release. Default: curie",
+                  "id": "namespace",
+                  "long": "namespace",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "default_values": [
+                    "curie"
+                  ],
+                  "global": false,
+                  "help": "Helm release name. Default: curie",
+                  "id": "release",
+                  "long": "release",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "global": false,
+                  "id": "dry_run",
+                  "long": "dry-run",
+                  "positional": false,
+                  "possible_values": [
+                    "true",
+                    "false"
+                  ],
+                  "required": false
+                }
+              ],
+              "hidden": false,
+              "name": "show"
+            },
+            {
+              "about": "Replace one or both hook maps from a JSON file. An empty map clears it",
+              "args": [
+                {
+                  "global": false,
+                  "help": "Agent name or id",
+                  "id": "agent",
+                  "positional": true,
+                  "required": true
+                },
+                {
+                  "env": "CURIE_API_URL",
+                  "global": false,
+                  "help": "Platform API base URL. Omit to self-plumb a loopback tunnel to the release API",
+                  "id": "api_url",
+                  "long": "api-url",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "env": "CURIE_API_KEY",
+                  "global": false,
+                  "help": "Platform API key. Omit to read the release's `api.apiKey` from its Secret",
+                  "id": "api_key",
+                  "long": "api-key",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "default_values": [
+                    "curie"
+                  ],
+                  "env": "CURIE_NAMESPACE",
+                  "global": false,
+                  "help": "Kubernetes namespace of the release. Default: curie",
+                  "id": "namespace",
+                  "long": "namespace",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "default_values": [
+                    "curie"
+                  ],
+                  "global": false,
+                  "help": "Helm release name. Default: curie",
+                  "id": "release",
+                  "long": "release",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "global": false,
+                  "id": "dry_run",
+                  "long": "dry-run",
+                  "positional": false,
+                  "possible_values": [
+                    "true",
+                    "false"
+                  ],
+                  "required": false
+                },
+                {
+                  "global": false,
+                  "id": "file",
+                  "long": "file",
+                  "positional": false,
+                  "required": true
+                }
+              ],
+              "hidden": false,
+              "name": "configure"
+            },
+            {
+              "about": "Read the derived hook signing secret for an agent",
+              "args": [
+                {
+                  "global": false,
+                  "help": "Agent name or id",
+                  "id": "agent",
+                  "positional": true,
+                  "required": true
+                },
+                {
+                  "env": "CURIE_API_URL",
+                  "global": false,
+                  "help": "Platform API base URL. Omit to self-plumb a loopback tunnel to the release API",
+                  "id": "api_url",
+                  "long": "api-url",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "env": "CURIE_API_KEY",
+                  "global": false,
+                  "help": "Platform API key. Omit to read the release's `api.apiKey` from its Secret",
+                  "id": "api_key",
+                  "long": "api-key",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "default_values": [
+                    "curie"
+                  ],
+                  "env": "CURIE_NAMESPACE",
+                  "global": false,
+                  "help": "Kubernetes namespace of the release. Default: curie",
+                  "id": "namespace",
+                  "long": "namespace",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "default_values": [
+                    "curie"
+                  ],
+                  "global": false,
+                  "help": "Helm release name. Default: curie",
+                  "id": "release",
+                  "long": "release",
+                  "positional": false,
+                  "required": false
+                },
+                {
+                  "global": false,
+                  "id": "dry_run",
+                  "long": "dry-run",
+                  "positional": false,
+                  "possible_values": [
+                    "true",
+                    "false"
+                  ],
+                  "required": false
+                }
+              ],
+              "hidden": false,
+              "name": "secret"
+            }
+          ]
+        },
+        {
           "about": "Show what an agent has learned (its memory log; `GET /agents/{id}/memory`). `--add <content>` seeds an operator-authored record; a fresh session is required before it is injected at boot",
           "args": [
             {
@@ -5674,7 +6041,7 @@ export const commandManifest = {
                 },
                 {
                   "global": false,
-                  "help": "Install the upgrade path: the self-upgrade connector, the platform upgrade Job, and the two identities behind them",
+                  "help": "Install the upgrade path: the self-upgrade connector, the platform upgrade Job, and the two identities behind them. Applies upgrade-role.yaml, platform-upgrade-role.yaml, and the rendered platform-upgrade ConfigMap and suspended CronJob. Arms only upgrade_platform: no self-upgrade CronJob is applied, so upgrade_self stays unarmed",
                   "id": "platform_upgrade",
                   "long": "platform-upgrade",
                   "positional": false,
