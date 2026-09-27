@@ -3465,6 +3465,107 @@ def test_consumed_review_history_capacity_still_posts_pr_failure(review_stack) -
     ) == [{"status": "pending"}]
 
 
+def test_history_capacity_with_lost_reservation_identity_still_posts_pr_failure(
+    review_stack,
+) -> None:
+    client, truth, valkey, stream = review_stack
+    base, payload, headers = _review_reserve_request(review_stack)
+    reserved = client.post(base + "/reserve", json=payload, headers=headers)
+    assert reserved.status_code == 200, reserved.text
+    unrelated_origin = f"other-review-{uuid.uuid4()}"
+    review_rows(
+        "UPDATE curie.publication_review_reservations SET origin_key=:origin_key "
+        "WHERE id=:reservation_id",
+        {"origin_key": unrelated_origin, "reservation_id": reserved.json()["reservation_id"]},
+    )
+    assert review_rows(
+        "SELECT origin_key,status FROM curie.publication_review_reservations"
+    ) == [{"origin_key": unrelated_origin, "status": "reserved"}]
+
+    _write_review_history_capacity_terminal(client, valkey, truth.feedback.event_id, stream)
+    reconciler = client.app.state.github_review_reconciler
+    assert client.portal.call(reconciler.reconcile_terminal) == 1
+    row = review_rows(
+        "SELECT status,error_code,notice_marker FROM curie.github_review_feedback"
+    )[0]
+    assert row["status"] in {"refused", "settled"}
+    assert row["error_code"] == "history_capacity_notified"
+    assert isinstance(row["notice_marker"], uuid.UUID)
+    assert len(truth.comment_posts) == 1
+    assert truth.feedback.event_id in truth.comment_posts[0]
+    assert truth.feedback.url in truth.comment_posts[0]
+    assert client.portal.call(reconciler.reconcile_terminal) == 0
+    assert len(truth.comment_posts) == 1
+    assert review_rows(
+        "SELECT origin_key,status FROM curie.publication_review_reservations"
+    ) == [{"origin_key": unrelated_origin, "status": "reserved"}]
+
+
+def test_history_capacity_with_reserved_publication_still_posts_pr_failure(
+    review_stack,
+) -> None:
+    client, truth, valkey, stream = review_stack
+    base, payload, headers = _review_reserve_request(review_stack)
+    reserved = client.post(base + "/reserve", json=payload, headers=headers)
+    assert reserved.status_code == 200, reserved.text
+    publication = client.post(
+        "/v1/internal/publications",
+        headers=headers,
+        json={
+            "deployment_id": payload["deployment_id"],
+            "conversation_id": scoped_conversation_id(
+                "slack", "C0EXAMPLE1", payload["turn"]["conversation_id"]
+            ),
+            "repo_full_name": REPO,
+            "author": payload["turn"]["author"],
+            "summary": "Review revision fixture",
+            "reply_kind": "slack",
+            "reply_channel": "C0EXAMPLE1",
+            "reply_conversation_id": payload["turn"]["conversation_id"],
+            "reply_placeholder": "1700000000.000003",
+            "dedupe_key": f"review-publication-{uuid.uuid4()}",
+            "review_origin_key": truth.feedback.event_id,
+            "base_sha": HEAD,
+            "patch_b64": base64.b64encode(b"diff --git a/a b/a\n").decode(),
+            "changed_paths": ["a"],
+            "expires_in_seconds": 600,
+        },
+    )
+    assert publication.status_code == 201, publication.text
+    assert publication.json()["id"] == reserved.json()["reservation_id"]
+    review_rows(
+        "UPDATE curie.publication_review_reservations SET status='reserved' "
+        "WHERE id=:reservation_id",
+        {"reservation_id": reserved.json()["reservation_id"]},
+    )
+    assert review_rows(
+        "SELECT status FROM curie.publication_review_reservations"
+    ) == [{"status": "reserved"}]
+
+    _write_review_history_capacity_terminal(client, valkey, truth.feedback.event_id, stream)
+    reconciler = client.app.state.github_review_reconciler
+    assert client.portal.call(reconciler.reconcile_terminal) == 1
+    row = review_rows(
+        "SELECT status,error_code,notice_marker FROM curie.github_review_feedback"
+    )[0]
+    assert row["status"] in {"refused", "settled"}
+    assert row["error_code"] == "history_capacity_notified"
+    assert isinstance(row["notice_marker"], uuid.UUID)
+    assert len(truth.comment_posts) == 1
+    assert truth.feedback.event_id in truth.comment_posts[0]
+    assert truth.feedback.url in truth.comment_posts[0]
+    assert client.portal.call(reconciler.reconcile_terminal) == 0
+    assert len(truth.comment_posts) == 1
+    assert review_rows(
+        "SELECT status FROM curie.publications WHERE id=:id",
+        {"id": publication.json()["id"]},
+    ) == [{"status": "pending"}]
+    assert review_rows(
+        "SELECT status FROM curie.approvals WHERE id=:id",
+        {"id": publication.json()["approval_id"]},
+    ) == [{"status": "pending"}]
+
+
 HELD_INDEX = "curie:github-review:held"
 SECOND_DELIVERY = str(uuid.UUID(int=3))
 
