@@ -259,6 +259,53 @@ fn ready_workload_replicas(items: &[serde_json::Value]) -> usize {
         .sum()
 }
 
+/// The worker claim gate's row. Rendered even when the release is not serving:
+/// a cancelled `helm upgrade` leaves the latest revision `failed`, which is when
+/// a lingering quiesce marker most needs reporting (#3198).
+fn worker_claims_check(
+    worker_claims: &crate::worker_claims::ClaimsState,
+    namespace: &str,
+    release: &str,
+) -> Check {
+    match worker_claims {
+        crate::worker_claims::ClaimsState::ClaimsEnabled => {
+            ok("worker-claims", "Worker claims", "claims enabled")
+        }
+        crate::worker_claims::ClaimsState::Quiescing { revision, .. } => {
+            let detail = worker_claims
+                .wait_reason()
+                .expect("a quiescing claim state has a wait reason");
+            missing(
+                "worker-claims",
+                "Worker claims",
+                detail,
+                format!(
+                    "wait for upgrade revision {revision} to finish, then re-run `curie doctor \
+                     --namespace {namespace} --release {release}` and `{}`",
+                    targeted("status", namespace, release)
+                ),
+            )
+        }
+        crate::worker_claims::ClaimsState::QuiescingMetadataUnavailable { .. } => missing(
+            "worker-claims",
+            "Worker claims",
+            worker_claims
+                .wait_reason()
+                .expect("a metadata-free quiescing state has a wait reason"),
+            format!(
+                "wait for the current upgrade to finish, then re-run `curie doctor \
+                 --namespace {namespace} --release {release}` and `{}`",
+                targeted("status", namespace, release)
+            ),
+        ),
+        crate::worker_claims::ClaimsState::Unknown => skipped(
+            "worker-claims",
+            "Worker claims",
+            "worker claim state unknown",
+        ),
+    }
+}
+
 /// Why an Installed helm record is not serving. Only Helm's `failed` status
 /// word and an observed empty ready set; unobserved workloads and other
 /// status strings are not a serving failure.
@@ -1080,47 +1127,14 @@ fn evaluate_with_worker_claims(
         ] {
             out.push(skipped(id, title, reason));
         }
+        if let Some(worker_claims) = worker_claims {
+            out.push(worker_claims_check(worker_claims, namespace, release));
+        }
         return out;
     }
 
     if let Some(worker_claims) = worker_claims {
-        out.push(match worker_claims {
-            crate::worker_claims::ClaimsState::ClaimsEnabled => {
-                ok("worker-claims", "Worker claims", "claims enabled")
-            }
-            crate::worker_claims::ClaimsState::Quiescing { revision, .. } => {
-                let detail = worker_claims
-                    .wait_reason()
-                    .expect("a quiescing claim state has a wait reason");
-                missing(
-                    "worker-claims",
-                    "Worker claims",
-                    detail,
-                    format!(
-                        "wait for upgrade revision {revision} to finish, then re-run `curie doctor \
-                         --namespace {namespace} --release {release}` and `{}`",
-                        targeted("status", namespace, release)
-                    ),
-                )
-            }
-            crate::worker_claims::ClaimsState::QuiescingMetadataUnavailable { .. } => missing(
-                "worker-claims",
-                "Worker claims",
-                worker_claims
-                    .wait_reason()
-                    .expect("a metadata-free quiescing state has a wait reason"),
-                format!(
-                    "wait for the current upgrade to finish, then re-run `curie doctor \
-                     --namespace {namespace} --release {release}` and `{}`",
-                    targeted("status", namespace, release)
-                ),
-            ),
-            crate::worker_claims::ClaimsState::Unknown => skipped(
-                "worker-claims",
-                "Worker claims",
-                "worker claim state unknown",
-            ),
-        });
+        out.push(worker_claims_check(worker_claims, namespace, release));
     }
 
     if f.mail_channels.is_empty() {
