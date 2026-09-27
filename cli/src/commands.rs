@@ -5617,6 +5617,112 @@ pub struct AgentActionOpts {
     pub dry_run: bool,
 }
 
+/// One success result for both local and cluster hook operations. The secret
+/// variant deliberately has no Debug implementation.
+pub enum HookOutput {
+    DryRun(crate::ui::DryRunPlan),
+    Config {
+        id: String,
+        agent: String,
+        hook_partitions: Option<BTreeMap<String, serde_json::Value>>,
+        source_bindings: Option<BTreeMap<String, serde_json::Value>>,
+    },
+    Secret {
+        secret: String,
+    },
+}
+
+impl crate::ui::CliOutput for HookOutput {
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::DryRun(plan) => plan.to_json(),
+            Self::Config {
+                id,
+                agent,
+                hook_partitions,
+                source_bindings,
+            } => serde_json::json!({
+                "id": id,
+                "agent": agent,
+                "hook_partitions": hook_partitions,
+                "source_bindings": source_bindings,
+            }),
+            Self::Secret { secret } => serde_json::json!({"secret": secret}),
+        }
+    }
+
+    fn render(&self, ui: &crate::ui::Ui) {
+        match self {
+            Self::DryRun(plan) => plan.render(ui),
+            Self::Config { .. } => ui.payload_plain(
+                &serde_json::to_string_pretty(&self.to_json()).expect("hook config is JSON"),
+            ),
+            Self::Secret { secret } => ui.payload_plain(secret),
+        }
+    }
+}
+
+fn hook_config_output(agent: crate::api::Agent) -> HookOutput {
+    HookOutput::Config {
+        id: agent.id,
+        agent: agent.name,
+        hook_partitions: agent.hook_partitions,
+        source_bindings: agent.source_bindings,
+    }
+}
+
+pub async fn hooks_show(opts: AgentActionOpts) -> Result<HookOutput> {
+    if opts.dry_run {
+        return Ok(HookOutput::DryRun(crate::ui::DryRunPlan {
+            lines: vec![format!(
+                "GET /agents  (would find agent {:?} and show its hook configuration)",
+                opts.agent
+            )],
+        }));
+    }
+    let client = ApiClient::new(&opts.api_url, &opts.api_key)?;
+    Ok(hook_config_output(client.find_agent(&opts.agent).await?))
+}
+
+pub async fn hooks_configure(opts: AgentActionOpts, file: &Path) -> Result<HookOutput> {
+    let raw = std::fs::read_to_string(file)
+        .with_context(|| format!("reading hook configuration from {}", file.display()))?;
+    let config: crate::api::HookConfigInput = serde_json::from_str(&raw)
+        .with_context(|| format!("decoding hook configuration from {}", file.display()))?;
+    if config.is_empty() {
+        bail!("hook configuration must contain hook_partitions or source_bindings");
+    }
+    let body = serde_json::to_value(config).context("encoding hook configuration")?;
+    if opts.dry_run {
+        return Ok(HookOutput::DryRun(crate::ui::DryRunPlan {
+            lines: vec![format!(
+                "PATCH /agents/<id>  (would resolve agent {:?} and update hook configuration)",
+                opts.agent
+            )],
+        }));
+    }
+    let client = ApiClient::new(&opts.api_url, &opts.api_key)?;
+    let agent = client.find_agent(&opts.agent).await?;
+    Ok(hook_config_output(
+        client.update_agent(&agent.id, &body).await?,
+    ))
+}
+
+pub async fn hooks_secret(opts: AgentActionOpts) -> Result<HookOutput> {
+    if opts.dry_run {
+        return Ok(HookOutput::DryRun(crate::ui::DryRunPlan {
+            lines: vec![format!(
+                "GET /agents/<id>/hook-secret  (would resolve agent {:?} first; secret redacted)",
+                opts.agent
+            )],
+        }));
+    }
+    let client = ApiClient::new(&opts.api_url, &opts.api_key)?;
+    let agent = client.find_agent(&opts.agent).await?;
+    let secret = client.hook_secret(&agent.id).await?;
+    Ok(HookOutput::Secret { secret })
+}
+
 /// Output of `<tier> kill <agent>`: the dry-run plan, or the resulting kill
 /// state. Owns its data (agent name) so `to_json` / `render` outlive the
 /// `ApiClient`. The json-vs-human choice is made once, in `Ui::emit` (#456).
