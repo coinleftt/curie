@@ -35,20 +35,25 @@ fn write_exec(dir: &Path, name: &str, body: &str) {
 }
 
 const FAKE_CLUSTER: &str = r###"#!/usr/bin/env python3
-import json, os, pathlib, sys
+import fcntl, json, os, pathlib, sys
 
 NS = "agent-ns"
 RELEASE = "prod-release"
 
 state_path = pathlib.Path(os.environ["CURIE_TEST_CLUSTER_STATE"])
 log_path = pathlib.Path(os.environ["CURIE_TEST_CLUSTER_LOG"])
+state_lock_path = state_path.with_suffix(state_path.suffix + ".lock")
+state_lock = state_lock_path.open("a")
+fcntl.flock(state_lock.fileno(), fcntl.LOCK_EX)
 state = json.loads(state_path.read_text())
 args = sys.argv[1:]
 with log_path.open("a") as log:
     log.write(pathlib.Path(sys.argv[0]).name + " " + " ".join(args) + "\n")
 
 def save():
-    state_path.write_text(json.dumps(state))
+    temp_path = state_path.with_name(f"{state_path.name}.{os.getpid()}.tmp")
+    temp_path.write_text(json.dumps(state))
+    os.replace(temp_path, state_path)
 
 def fail(message, code=1):
     print(message, file=sys.stderr)
@@ -177,7 +182,8 @@ if args and args[0] == "get" and len(args) >= 2:
     if record is None:
         fail(f'Error from server (NotFound): namespaces "{namespace}" not found')
     selector = option("-l", "--selector")
-    if not selector and resource in state["resources"]:
+    field_selector = option("--field-selector")
+    if not selector and not field_selector and resource in state["resources"]:
         state["inventory_seen"].append(resource)
     if resource in ("jobs", "job", "jobs.batch"):
         items = [item for item in state["jobs"].get(namespace, [])
