@@ -2063,6 +2063,110 @@ def _actions_check_run(
     }
 
 
+PYTHON_CI_CHECK = "Python (ruff + mypy + pytest)"
+PYTHON_CI_PATHS = [
+    "apps/api/src/curie_api/factory_ci.py",
+    "apps/api/tests/test_workitem_outcomes.py",
+]
+
+
+def _factory_ci_detail(
+    *,
+    runs: list[dict[str, Any]] | None = None,
+    state: str = "observed",
+    reason: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        state=state,
+        reason=reason,
+        check_runs=[] if runs is None else runs,
+        statuses=[],
+    )
+
+
+def _decide_factory_ci(
+    detail: SimpleNamespace,
+    changed_path: str,
+    *,
+    sandbox_unavailable: bool = True,
+) -> Any:
+    return factory_ci.decide(
+        detail,
+        now=datetime(2026, 9, 24, 12, 5, tzinfo=UTC),
+        published_at=datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
+        execution_deadline=datetime(2026, 9, 24, 12, 30, tzinfo=UTC),
+        ci_wait_seconds=1200,
+        changed_paths=[changed_path],
+        sandbox_unavailable=sandbox_unavailable,
+    )
+
+
+@pytest.mark.parametrize("changed_path", PYTHON_CI_PATHS)
+def test_sandbox_unavailable_requires_the_exact_python_ci_run(
+    changed_path: str,
+) -> None:
+    successful = _actions_check_run(7001, PYTHON_CI_CHECK, "success")
+
+    verdict = _decide_factory_ci(
+        _factory_ci_detail(runs=[successful]), changed_path
+    )
+
+    assert verdict.kind == "green"
+
+
+@pytest.mark.parametrize(
+    "runs",
+    [
+        [],
+        [_actions_check_run(7001, PYTHON_CI_CHECK, "skipped")],
+        [_actions_check_run(7001, PYTHON_CI_CHECK, "neutral")],
+        [_actions_check_run(7001, "Python tests", "success")],
+        [
+            {
+                **_actions_check_run(7001, PYTHON_CI_CHECK, "success"),
+                "status": "in_progress",
+            }
+        ],
+        [_actions_check_run(7001, PYTHON_CI_CHECK, "failure")],
+    ],
+    ids=["missing", "skipped", "neutral", "unrelated", "incomplete", "failed"],
+)
+@pytest.mark.parametrize("changed_path", PYTHON_CI_PATHS)
+def test_sandbox_unavailable_never_accepts_incomplete_python_ci_evidence(
+    changed_path: str, runs: list[dict[str, Any]]
+) -> None:
+    verdict = _decide_factory_ci(_factory_ci_detail(runs=runs), changed_path)
+
+    assert verdict.kind != "green"
+
+
+@pytest.mark.parametrize("changed_path", PYTHON_CI_PATHS)
+def test_sandbox_unavailable_fails_closed_when_ci_is_unreadable(
+    changed_path: str,
+) -> None:
+    detail = _factory_ci_detail(state="unavailable", reason="github_forbidden")
+
+    verdict = _decide_factory_ci(detail, changed_path)
+
+    assert verdict.kind == "unverified"
+
+
+def test_python_check_is_not_required_when_sandbox_tools_are_available() -> None:
+    verdict = _decide_factory_ci(
+        _factory_ci_detail(), PYTHON_CI_PATHS[0], sandbox_unavailable=False
+    )
+
+    assert verdict.kind == "no_ci"
+
+
+def test_python_check_is_not_required_for_an_unselected_ui_path() -> None:
+    verdict = _decide_factory_ci(
+        _factory_ci_detail(), "apps/ui/src/App.tsx", sandbox_unavailable=True
+    )
+
+    assert verdict.kind == "no_ci"
+
+
 @pytest.mark.parametrize(
     "signed_log_url",
     [
