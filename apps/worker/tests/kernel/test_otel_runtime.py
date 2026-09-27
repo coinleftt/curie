@@ -40,6 +40,7 @@ from curie_worker import threadlock as threadlock_module
 from curie_worker.approvals import ApprovalRequest, CreatedApproval
 from curie_worker.behaviorpacks import BehaviorPacks
 from curie_worker.consumer import Consumer
+from curie_worker.delivery_lease import DeliveryLeaseStore
 from curie_worker.reply_sink import TargetRoute
 from curie_worker.sandbox import substrate as substrate_module
 from opentelemetry import context as otel_context
@@ -247,7 +248,12 @@ def test_missing_or_malformed_carrier_runs_and_acks_under_a_safe_root(
         probe = _install(monkeypatch)
         async with make_harness() as h:
             h.runner.default_script = [Final(text="safe", status=DONE)]
-            consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+            consumer = Consumer(
+                redis=h.async_redis,
+                kernel=h.kernel,
+                config=h.config,
+                leases=DeliveryLeaseStore(h.async_redis, h.config),
+            )
             await consumer.ensure_group()
             fields = {"payload": _qevent("safe root").model_dump_json()}
             if carrier is not None:
@@ -480,7 +486,12 @@ def test_worker_process_parent_flows_to_exact_runner_http_client_boundary(
         probe = _install(monkeypatch)
         async with make_harness() as h:
             h.runner.default_script = [Final(text="traced", status=DONE)]
-            consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+            consumer = Consumer(
+                redis=h.async_redis,
+                kernel=h.kernel,
+                config=h.config,
+                leases=DeliveryLeaseStore(h.async_redis, h.config),
+            )
             await consumer.ensure_group()
             event = _qevent("trace me", event_id="Ev0EXAMPLETRACE1")
             fields = {
@@ -522,10 +533,15 @@ def test_queue_success_retry_and_dead_letter_emit_bounded_outcomes_and_keep_carr
     async def go() -> None:
         probe = _install(monkeypatch)
         async with make_harness(max_delivery=2, reclaim_min_idle_ms=0) as h:
-            consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+            consumer = Consumer(
+                redis=h.async_redis,
+                kernel=h.kernel,
+                config=h.config,
+                leases=DeliveryLeaseStore(h.async_redis, h.config),
+            )
             await consumer.ensure_group()
 
-            async def fail(_turn: QueuedTurn) -> None:
+            async def fail(_turn: QueuedTurn, *, lease: Any) -> None:
                 raise RuntimeError("injected processing failure")
 
             h.kernel.process_event = fail  # type: ignore[method-assign]
@@ -995,7 +1011,12 @@ def test_every_named_request_path_span_carries_the_delivered_event_id(
         probe = _install(monkeypatch)
         async with make_harness() as h:
             h.runner.default_script = [Final(text="stamped", status=DONE)]
-            consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+            consumer = Consumer(
+                redis=h.async_redis,
+                kernel=h.kernel,
+                config=h.config,
+                leases=DeliveryLeaseStore(h.async_redis, h.config),
+            )
             await consumer.ensure_group()
             event = _qevent("stamp me", event_id="Ev0EXAMPLEKNOWN1")
 
@@ -1025,10 +1046,15 @@ def test_failed_processing_keeps_the_event_id_on_the_span_and_off_the_metrics(
     async def go() -> None:
         probe = _install(monkeypatch)
         async with make_harness() as h:
-            consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+            consumer = Consumer(
+                redis=h.async_redis,
+                kernel=h.kernel,
+                config=h.config,
+                leases=DeliveryLeaseStore(h.async_redis, h.config),
+            )
             await consumer.ensure_group()
 
-            async def fail(_turn: QueuedTurn) -> None:
+            async def fail(_turn: QueuedTurn, *, lease: Any) -> None:
                 raise RuntimeError("injected processing failure")
 
             h.kernel.process_event = fail  # type: ignore[method-assign]
@@ -1065,7 +1091,12 @@ def test_lease_loss_pending_path_keeps_the_event_id_on_the_span(
         probe = _install(monkeypatch)
         async with make_harness() as h:
             h.runner.default_script = [Final(text="pending", status=DONE)]
-            consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+            consumer = Consumer(
+                redis=h.async_redis,
+                kernel=h.kernel,
+                config=h.config,
+                leases=DeliveryLeaseStore(h.async_redis, h.config),
+            )
             await consumer.ensure_group()
 
             class _LostLease:
@@ -1182,7 +1213,12 @@ def test_twelve_overlapping_turns_keep_their_event_ids_on_their_own_subtrees(
                 runner.tail = [Final(text="done", status=DONE)]
                 runner.hold = rendezvous
 
-            consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+            consumer = Consumer(
+                redis=h.async_redis,
+                kernel=h.kernel,
+                config=h.config,
+                leases=DeliveryLeaseStore(h.async_redis, h.config),
+            )
             await consumer.ensure_group()
             assert consumer._max_concurrency >= turns, (
                 "the consumer semaphore must admit every turn at once, or the "
@@ -1292,7 +1328,12 @@ def test_no_event_id_survives_a_turn_or_crosses_into_the_next_one(
         probe = _install(monkeypatch)
         async with make_harness() as h:
             h.runner.default_script = [Final(text="a", status=DONE)]
-            consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+            consumer = Consumer(
+                redis=h.async_redis,
+                kernel=h.kernel,
+                config=h.config,
+                leases=DeliveryLeaseStore(h.async_redis, h.config),
+            )
             await consumer.ensure_group()
             first = _qevent("first", thread="thread-leak-a", event_id="Ev0EXAMPLELEAKA1")
             await _deliver(consumer, h, {"payload": first.model_dump_json()})
@@ -1342,7 +1383,12 @@ def test_thread_reset_drain_spans_are_not_stamped_with_the_turns_event_id(
         probe = _install(monkeypatch)
         async with make_harness() as h:
             h.runner.default_script = [Final(text="drained", status=DONE)]
-            consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+            consumer = Consumer(
+                redis=h.async_redis,
+                kernel=h.kernel,
+                config=h.config,
+                leases=DeliveryLeaseStore(h.async_redis, h.config),
+            )
             await consumer.ensure_group()
             # A DIFFERENT thread than the turn's: the drain tears down thread B
             # while turn A is in flight on the same handler task.

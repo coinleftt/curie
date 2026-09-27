@@ -1,6 +1,6 @@
-"""Migration 0063 adds curie.execution_request_model_usage (#3223).
+"""Migration 0067 adds curie.execution_request_model_usage (#3223).
 
-Pinned: revision "0063", down_revision "0062". Runs on a private database
+Pinned: revision "0067", down_revision "0066". Runs on a private database
 (``isolated_migration_db``), never the shared one, per apps/api/CLAUDE.md.
 """
 
@@ -97,20 +97,20 @@ def _insert(request_id: uuid.UUID, **overrides: Any) -> None:
     )
 
 
-def test_0063_follows_0062() -> None:
-    script = ScriptDirectory.from_config(_config()).get_revision("0063")
+def test_0067_follows_0066() -> None:
+    script = ScriptDirectory.from_config(_config()).get_revision("0067")
     assert script is not None
-    assert script.down_revision == "0062"
+    assert script.down_revision == "0066"
 
 
-def test_0063_creates_the_usage_table_with_its_guards_and_downgrades(
+def test_0067_creates_the_usage_table_with_its_guards_and_downgrades(
     isolated_migration_db: None,
 ) -> None:
     config = _config()
-    command.upgrade(config, "0062")
+    command.upgrade(config, "0066")
     try:
         assert _table() is None
-        command.upgrade(config, "0063")
+        command.upgrade(config, "0067")
         assert _table() is not None
 
         request_id = _seed_request()
@@ -129,7 +129,7 @@ def test_0063_creates_the_usage_table_with_its_guards_and_downgrades(
         _sql("DELETE FROM curie.execution_requests WHERE id = :id", {"id": request_id})
         assert _sql("SELECT count(*) AS n FROM curie.execution_request_model_usage")[0]["n"] == 0
 
-        command.downgrade(config, "0062")
+        command.downgrade(config, "0066")
         assert _table() is None
     finally:
         command.upgrade(config, "head")

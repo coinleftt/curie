@@ -1,7 +1,7 @@
 """Persist operator pause state for one agent and named cron hook (#2937).
 
-Revision ID: 0061
-Revises: 0060
+Revision ID: 0065
+Revises: 0064
 Create Date: 2026-09-26
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0061"
-down_revision: str | None = "0060"
+revision: str = "0065"
+down_revision: str | None = "0064"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -8,8 +8,8 @@ There is no backfill. The scheduler holds a claim with no lease, one made
 before this revision or by an older worker during a rollout, for one
 configured lease from its start. ``outcome`` gains ``reclaimed``.
 
-Revision ID: 0062
-Revises: 0061
+Revision ID: 0066
+Revises: 0065
 Create Date: 2026-09-26
 """
 
@@ -18,8 +18,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0062"
-down_revision: str | None = "0061"
+revision: str = "0066"
+down_revision: str | None = "0065"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

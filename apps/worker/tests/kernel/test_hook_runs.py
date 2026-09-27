@@ -1023,6 +1023,7 @@ def test_lost_lease_after_cron_start_leaves_run_open(
                     h.config.consumer_group,
                     entry_id,
                     owner=lease.owner,
+                    resume_event_id=None,
                 )
                 lease.lost.set()
                 hold.set()
