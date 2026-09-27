@@ -288,6 +288,8 @@ def _config_for(
     )
     if approval_grant_tool is not None:
         env[BootEnv.env_key("approval_grant_tool")] = approval_grant_tool
+        # A permission grant carries the approved arguments (#3174).
+        env[BootEnv.env_key("approval_grant_arguments")] = "{}"
     return RunnerConfig.from_env(env)
 
 
