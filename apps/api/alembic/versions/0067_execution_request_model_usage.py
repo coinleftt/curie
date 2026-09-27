@@ -5,8 +5,8 @@ model, role) as the runner reports it at turn end. The cost estimate, its price
 source, and its price time are all NULL or all set, so an unpriced model keeps
 its tokens with no estimate. Rows go with their request.
 
-Revision ID: 0063
-Revises: 0062
+Revision ID: 0067
+Revises: 0066
 Create Date: 2026-09-26
 """
 
@@ -16,8 +16,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0063"
-down_revision: str | None = "0062"
+revision: str = "0067"
+down_revision: str | None = "0066"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

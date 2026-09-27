@@ -564,8 +564,9 @@ def test_deadline_halted_is_a_declared_terminal_turn_outcome(
         assert "deadline_halted" in outcomes
         for sibling in ("budget_halted", "interrupted", "side_effect_halted"):
             assert sibling in outcomes
+        assert "capacity_wait_expired" in outcomes
         assert "fenced_out" not in outcomes
-        assert manifest[name]["cardinality_bound"] == 192
+        assert manifest[name]["cardinality_bound"] == 216
 
 
 def test_supervised_restart_metric_declares_closed_operation_domain() -> None:
@@ -671,7 +672,7 @@ def test_agent_turn_metric_keeps_a_named_agent_and_folds_past_the_ceiling(
     assert "not a slug" not in labels
     manifest = declared_metric_manifest()["metrics"]["curie.agent.turn.completed"]
     assert manifest["attributes"]["agent"]["ceiling"] == 32
-    assert manifest["cardinality_bound"] == 8 * (32 + 2)
+    assert manifest["cardinality_bound"] == 9 * (32 + 2)
 
 
 def test_record_metric_still_rejects_unknown_turn_outcome(

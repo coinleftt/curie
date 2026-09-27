@@ -1,4 +1,4 @@
-"""Migration 0062 gives curie.hook_runs a claim lease and the reclaimed outcome."""
+"""Migration 0066 gives curie.hook_runs a claim lease and the reclaimed outcome."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 ALEMBIC_DIR = Path(__file__).resolve().parents[1] / "alembic"
-BELOW = "0061"
-REVISION = "0062"
+BELOW = "0065"
+REVISION = "0066"
 SLOT = datetime(2026, 9, 22, 16, 0, tzinfo=UTC)
 STARTED = datetime(2026, 9, 22, 16, 0, 5, tzinfo=UTC)
 
@@ -92,7 +92,7 @@ def _has_lease_column() -> bool:
     return bool(rows)
 
 
-def test_0062_leaves_existing_claims_leaseless_and_allows_reclaimed(
+def test_0066_leaves_existing_claims_leaseless_and_allows_reclaimed(
     isolated_migration_db: None,
 ) -> None:
     config = _config()
@@ -114,7 +114,7 @@ def test_0062_leaves_existing_claims_leaseless_and_allows_reclaimed(
     assert "hook_runs_outcome_ck" in str(excinfo.value)
 
 
-def test_0062_round_trip(isolated_migration_db: None) -> None:
+def test_0066_round_trip(isolated_migration_db: None) -> None:
     config = _config()
     command.upgrade(config, REVISION)
     assert _has_lease_column()
