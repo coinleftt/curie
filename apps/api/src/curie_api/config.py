@@ -177,6 +177,10 @@ class Settings(BaseSettings):
         le=10800,
         validation_alias="GITHUB_FACTORY_CI_WAIT_S",
     )
+    # Public model price list the factory's per-run cost estimate reads
+    # (#3223), OpenRouter-shaped. Fetched at most every 6 h; any failure leaves
+    # the estimate unset and the token counts are still stored. Empty disables.
+    factory_price_source_url: str = "https://openrouter.ai/api/v1/models"
     dev_branch: str = "dev"
     prod_branch: str = "main"
     # Outbound GitHub credential. Used for the eval PR check's commit-status

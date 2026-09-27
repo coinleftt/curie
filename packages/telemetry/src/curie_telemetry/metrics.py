@@ -341,12 +341,14 @@ _HTTP_OPERATIONS = [
     "/v1/internal/work-items/requests/{request_id}/termination/claim",
     "/v1/internal/work-items/requests/{request_id}/termination",
     "/v1/work-item-progress/{request_id}",
+    "/v1/work-item-progress/{request_id}/usage",
     "/v1/factory/cards/{token}.svg",
     "/schedules",
     "/schedules/{agent}/{name}/pause",
     "/schedules/{agent}/{name}/resume",
     "/work-items",
     "/work-items/{work_item_id}",
+    "/work-items/{work_item_id}/usage",
     "unmatched",
 ]
 _HTTP_ATTRIBUTES = {
