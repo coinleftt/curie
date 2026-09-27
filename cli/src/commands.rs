@@ -2341,6 +2341,29 @@ pub async fn start(opts: StartOpts) -> Result<()> {
     // packing would leave the runner refusing the stale copy it was handed
     // while the source directory holds the fresh one.
     let connector_decl = crate::connector_build::load(&plugin_dir)?;
+    // Stage each hosted connector's Bearer secret into the runner env (#2518),
+    // the skill-tier twin of the cluster sandbox binding (#2503). The mounted
+    // entry (including the `unhosted_url` fallback) carries
+    // `Authorization: Bearer ${NAME}`, and the MCP client expands it from THIS
+    // container's env; a name that never reaches it ships the literal
+    // placeholder and the server answers 401. Resolved like `--secret`: the
+    // shell env first, then Curie storage; only the NAME rides the argv.
+    for name in crate::connector_build::hosted_env_secret_names(&connector_decl) {
+        crate::connector_build::refuse_reserved_env_secret_name(&name)?;
+        if passthrough_env.contains(&name) {
+            continue;
+        }
+        if !env_credential_present(&name) && !stored_env_contains(&docker_env, &name) {
+            match secret_store_env(&name)? {
+                Some(pair) => docker_env.push(pair),
+                None => crate::ui::ui().note(&format!(
+                    "connector secret {name}: not set in the environment or Curie secret store; \
+                     nothing will be forwarded for it"
+                )),
+            }
+        }
+        passthrough_env.push(name);
+    }
     let declares_hosted_connectors = connector_decl
         .connectors
         .values()
@@ -4973,14 +4996,16 @@ async fn prepare_deploy_with_commit_sha(
     // on the connector pod.
     let connector_env_secret_names =
         crate::connector_build::hosted_env_secret_names(&connector_decl);
-    // Automatic delivery of connectors.yaml secrets exists only for
-    // DeployTier::Cluster (#2503 follow-up); `local deploy` has no delivery
-    // path yet, so its effective set must stay exactly `opts.secret`.
-    let effective_secret_names = if opts.tier == DeployTier::Cluster {
-        merge_secret_env(opts.secret.clone(), &connector_env_secret_names)
-    } else {
-        opts.secret.clone()
-    };
+    // Before any value is read: local resolves these names from the operator's
+    // env and vault onto the agent record (#2518), and `unhosted_url`
+    // connectors escape `refuse_reserved_secret_names`.
+    for name in &connector_env_secret_names {
+        crate::connector_build::refuse_reserved_env_secret_name(name)?;
+    }
+    // Both tiers auto-bind the connectors.yaml Bearer names (#2503 cluster,
+    // #2518 local). Local resolves their values below and delivers them on the
+    // agent record, exactly like an explicit `--secret`.
+    let effective_secret_names = merge_secret_env(opts.secret.clone(), &connector_env_secret_names);
 
     if opts.secret_binding_supported {
         let declared = read_declared_secrets(&plugin_dir)?;
@@ -5124,17 +5149,31 @@ async fn prepare_deploy_with_commit_sha(
     // Resolve each --secret NAME to a value (env wins, else the host vault) so
     // the connector secret is bound on the agent for the worker to forward into
     // the sandbox (ADR-0009, #429). The value never appears in argv.
+    // On Local the auto-bound connector Bearer names are resolved here too
+    // (#2518): the record is local's only sandbox delivery path. Cluster keeps
+    // `opts.secret` alone; its connector values are resolved cluster-scoped.
+    let resolved_names: &[String] = match opts.tier {
+        DeployTier::Local => &effective_secret_names,
+        DeployTier::Cluster => &opts.secret,
+    };
     let mut secrets: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    for name in &opts.secret {
+    for name in resolved_names {
         let value = crate::secrets::resolve_env_or_saved(name)?;
         match value {
             Some(v) => {
                 secrets.insert(name.clone(), v);
             }
-            None => {
+            None if opts.secret.contains(name) => {
                 return Err(crate::exit::usage(format!(
                     "--secret {name}: not set in the environment and not saved in Curie \
                      storage; export it or run `curie secrets set {name}` first"
+                )));
+            }
+            None => {
+                return Err(crate::exit::usage(format!(
+                    "connector secret {name} (the Bearer secret connectors.yaml declares): not \
+                     set in the environment and not saved in Curie storage; export it or run \
+                     `curie secrets set {name}` first"
                 )));
             }
         }
@@ -10278,20 +10317,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deploy_local_tier_still_refuses_a_connectors_yaml_auto_bound_secret() {
-        // #2503 round-2 review finding: automatic hosted-connector secret
-        // delivery is Cluster-only (no sandbox delivery path on Local yet), so
-        // a bundle that declares GH in plugin.json AND connectors.yaml, with no
-        // `--secret` flag, must still be refused on `local deploy` -- the same
-        // bundle passes the gate on `cluster deploy` (see the paired test
-        // below). This drives the real gate through `deploy()`, not the pure
-        // helper functions.
+    async fn deploy_local_tier_auto_binds_and_resolves_a_connectors_yaml_bearer_secret() {
+        // #2518: local now auto-binds the connectors.yaml Bearer name, like
+        // cluster (#2503). The #464 gate must pass with no `--secret`, and the
+        // name must then be resolved for delivery on the agent record, so an
+        // unset value is refused by name before any network attempt.
         let dir = tempfile::tempdir().unwrap();
-        scaffold_with_secrets(dir.path(), "test-agent", &["GH"]);
+        scaffold_with_secrets(dir.path(), "test-agent", &["GH_2518_UNSET_BEARER"]);
         write_manifest(
             dir.path(),
             "connectors.yaml",
-            "connectors:\n  gh:\n    image: ghcr.io/example/gh:1\n    secrets:\n      - GH\n",
+            "connectors:\n  gh:\n    image: ghcr.io/example/gh:1\n    secrets:\n      - GH_2518_UNSET_BEARER\n",
         );
 
         let opts = super::DeployOpts {
@@ -10314,12 +10350,53 @@ mod tests {
         let err = super::deploy(opts).await.unwrap_err();
         let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("GH"),
-            "local deploy has no auto-delivery path, so the gate must still name GH: {rendered}"
+            !rendered.contains("declares connector secret(s) that were not bound on deploy"),
+            "local's effective bind set now includes the connectors.yaml name: {rendered}"
+        );
+        assert!(
+            rendered.contains("connector secret GH_2518_UNSET_BEARER"),
+            "the auto-bound name must be resolved for record delivery: {rendered}"
         );
         assert!(
             !rendered.contains("UNREACHABLE-HINT-SENTINEL"),
-            "the gate must fire before any network attempt: {rendered}"
+            "resolution must fail before any network attempt: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deploy_local_tier_refuses_a_reserved_auto_bound_bearer_before_reading_it() {
+        // #2518 review: an `unhosted_url` connector is skipped by
+        // `refuse_reserved_secret_names`, yet its Bearer name is auto-bound, so
+        // local would otherwise read the operator's model credential onto the
+        // agent record.
+        let dir = tempfile::tempdir().unwrap();
+        scaffold_with_secrets(dir.path(), "test-agent", &[]);
+        write_manifest(
+            dir.path(),
+            "connectors.yaml",
+            "connectors:\n  gh:\n    image: ghcr.io/example/gh:1\n    secrets:\n      - ANTHROPIC_API_KEY\n    unhosted_url: http://127.0.0.1:1/mcp\n",
+        );
+        let opts = super::DeployOpts {
+            delivery: None,
+            agent: None,
+            target: None,
+            plugin_dir: dir.path().to_path_buf(),
+            api_url: "http://127.0.0.1:1".to_string(),
+            api_key: "k".to_string(),
+            slack_channel: None,
+            repo: None,
+            workspace: super::WorkspaceIntent::Preserve,
+            env: Some(super::DeployEnv::Dev),
+            label: Some("v0".to_string()),
+            secret: vec![],
+            secret_binding_supported: true,
+            connect_hint: "UNREACHABLE-HINT-SENTINEL".to_string(),
+            tier: super::DeployTier::Local,
+        };
+        let rendered = format!("{:#}", super::deploy(opts).await.unwrap_err());
+        assert!(
+            rendered.contains("`ANTHROPIC_API_KEY` is a reserved"),
+            "a reserved Bearer name must be refused before resolution: {rendered}"
         );
     }
 
