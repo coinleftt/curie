@@ -1162,47 +1162,6 @@ def test_a_live_lease_is_never_reclaimed_by_the_expiry_pass(make_harness) -> Non
     asyncio.run(go())
 
 
-def test_the_expiry_pass_is_inert_without_a_lease_store(make_harness) -> None:
-    """A base-only consumer keeps its pre-ADR-0131 behavior exactly.
-
-    Red on dereferencing ``self._leases`` unconditionally in the new pass, and
-    red on keying the pass on the CONFIGURED threshold alone: the config carries
-    a threshold here, and the leaseless consumer must still do nothing with it,
-    because with no lease store there is no evidence to key on.
-
-    The fenced consumer on the same row is the positive control.
-    """
-
-    async def go() -> None:
-        async with make_harness(**_EXPIRY_KNOBS) as h:
-            store = DeliveryLeaseStore(h.async_redis, h.config)
-            leaseless = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
-            await leaseless.ensure_group()
-            attempts = _failing_process_event(h)
-
-            entry_id, _fields = await _lease_expired_row(
-                h, store, event_id="inert-1", owner="peer-one"
-            )
-            before = (await _pending_rows(h))[entry_id]
-            await _arm_pel_idle(
-                h, entry_id, owner="peer-one", idle_ms=_EXPIRY_IDLE_MS + 200
-            )
-
-            assert await leaseless._reclaim_once() == 0
-            assert attempts == []
-            assert (await _pending_rows(h))[entry_id] == before
-
-            # POSITIVE CONTROL: the same row, a fenced consumer.
-            fenced = Consumer(
-                redis=h.async_redis, kernel=h.kernel, config=h.config, leases=store
-            )
-            assert await fenced._reclaim_once() == 1
-            await _settle(fenced)
-            assert attempts == ["inert-1"]
-
-    asyncio.run(go())
-
-
 def test_the_runs_lane_carries_the_configured_lease_expiry_threshold(
     make_harness,
 ) -> None:

@@ -23,6 +23,7 @@ import contextlib
 import hmac
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 
 import anyio
@@ -86,6 +87,8 @@ SessionFactory = Callable[[], ModelSession]
 _CONNECTOR_RECOVERY_BUDGET_SECONDS = 20.0
 _HISTORY_PERSISTENCE_BUDGET_SECONDS = 15.0
 _HISTORY_REPLAY_EXPORT_BUDGET_SECONDS = 5.0
+_CAPACITY_ADMISSION_TIMEOUT_S = 30.0
+_CAPACITY_ADMISSION_HISTORY = 1024
 # Re-dials the connectors named by the current failures and returns the ones
 # still failing (#2634). Bound by ``build_runner`` over the materialized servers.
 ConnectorReprobe = Callable[
@@ -338,6 +341,9 @@ class SessionRunner:
         self._timeout_interrupt_settled: anyio.Event | None = None
         self._timeout_interrupt_delivered = False
         self._turn_epoch: str | None = None
+        self._admission_gate: anyio.Event | None = None
+        self._admission_granted = False
+        self._admission_results: OrderedDict[str, str] = OrderedDict()
         self._status = SessionStatus.IDLE_AWAITING_INPUT
         self._started = False
         # True only while a turn can still accept a steer: from turn start until
@@ -370,6 +376,39 @@ class SessionRunner:
         """True while a turn can still accept a steer (open, pre-terminal)."""
 
         return self._turn_open
+
+    @property
+    def active_turn_epoch(self) -> str | None:
+        """The exact turn owning the lock, for authenticated worker status."""
+
+        return self._turn_epoch if self._turn_open else None
+
+    def admission_result(self, turn_epoch: str) -> str:
+        """Return the private admission decision for one exact runner epoch."""
+
+        return self._admission_results.get(turn_epoch, "unknown")
+
+    def _remember_admission(self, turn_epoch: str, result: str) -> None:
+        self._admission_results[turn_epoch] = result
+        self._admission_results.move_to_end(turn_epoch)
+        while len(self._admission_results) > _CAPACITY_ADMISSION_HISTORY:
+            self._admission_results.popitem(last=False)
+
+    def admit_turn(self, turn_epoch: str, *, allow: bool) -> bool:
+        """Resolve a capacity turn before any connector or model work begins."""
+
+        gate = self._admission_gate
+        if (
+            gate is None
+            or gate.is_set()
+            or not self._turn_open
+            or self._turn_epoch != turn_epoch
+        ):
+            return False
+        self._admission_granted = allow
+        self._remember_admission(turn_epoch, "granted" if allow else "denied")
+        gate.set()
+        return True
 
     @property
     def history_durable(self) -> bool:
@@ -666,6 +705,11 @@ class SessionRunner:
         self._timeout_requested = True
         self._timeout_interrupt_settled = timeout_interrupt_settled
         if not self._turn_ready:
+            # A capacity turn may still be waiting for its admission decision.
+            # Wake that gate so an exact timeout can retire it promptly.
+            gate = self._admission_gate
+            if gate is not None and not gate.is_set():
+                gate.set()
             # Accepted turn still in connector recovery (#2634): no query was
             # sent, so there is nothing for an SDK interrupt to stop. run_turn
             # checks the flag after recovery and emits the timeout terminal.
@@ -706,6 +750,7 @@ class SessionRunner:
         *,
         parent: Context | None = None,
         turn_epoch: str | None = None,
+        admission_required: bool = False,
     ) -> AsyncGenerator[str]:
         """Run one turn, streaming ACI NDJSON lines and enforcing the budget.
 
@@ -725,6 +770,11 @@ class SessionRunner:
             self._timeout_interrupt_settled = None
             self._timeout_interrupt_delivered = False
             self._turn_epoch = turn_epoch
+            self._admission_gate = anyio.Event() if admission_required else None
+            self._admission_granted = False
+            if admission_required:
+                assert turn_epoch is not None
+                self._remember_admission(turn_epoch, "pending")
             self._persistence_owned = False
             self._turn_open = True
             self._history_durable = False
@@ -779,6 +829,35 @@ class SessionRunner:
                     parent=parent,
                 ) as gen:
                     try:
+                        if admission_required:
+                            gate = self._admission_gate
+                            assert gate is not None
+                            try:
+                                with anyio.fail_after(_CAPACITY_ADMISSION_TIMEOUT_S):
+                                    await gate.wait()
+                            except TimeoutError:
+                                self._admission_granted = False
+                            if not self._admission_granted:
+                                assert turn_epoch is not None
+                                if self.admission_result(turn_epoch) == "pending":
+                                    self._remember_admission(turn_epoch, "denied")
+                                self._turn_open = False
+                                self._turn_ready = False
+                                self._status = SessionStatus.CLASSIFIED_FAILURE
+                                metric_outcome = "classified_failure"
+                                gen.finish_turn(
+                                    interrupt_requested=False,
+                                    classified_failure=True,
+                                )
+                                terminal_for_log = True
+                                yield to_ndjson_line(
+                                    Final(
+                                        text="turn was not admitted",
+                                        status=SessionStatus.CLASSIFIED_FAILURE,
+                                    )
+                                )
+                                return
+                            self._admission_gate = None
                         if self._history_capacity_exceeded:
                             self._history_loss_observed = True
                             self._history_durable = False
@@ -991,6 +1070,8 @@ class SessionRunner:
                     self._turn_open = False
                     self._turn_ready = False
                     self._turn_epoch = None
+                    self._admission_gate = None
+                    self._admission_granted = False
                     self._timeout_interrupt_settled = None
                     self._timeout_interrupt_delivered = False
 

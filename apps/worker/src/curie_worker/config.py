@@ -598,6 +598,12 @@ class WorkerConfig(BaseSettings):
 
     # Markers
     idempotency_ttl_s: int = 86400
+    capacity_wait_budget_s: float = Field(
+        default=86400.0,
+        ge=1.0,
+        allow_inf_nan=False,
+        validation_alias="CURIE_CAPACITY_WAIT_BUDGET_S",
+    )
 
     # The completion outbox (ADR-0096 EB-B6). ``grace`` keeps the sweeper out of
     # the kernel's own emit window, so the normal path is not racing a sweeper on
