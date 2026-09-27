@@ -1600,6 +1600,29 @@ mod tests {
             .contains("marker expires in 30s"));
     }
 
+    /// #3198: a cancelled `helm upgrade` leaves the latest revision `failed`,
+    /// which is exactly when the quiesce marker matters. The worker-claims row
+    /// must still render, not be dropped with the values-backed checks.
+    #[test]
+    fn worker_claims_still_render_when_the_latest_revision_failed() {
+        let mut f = wired();
+        f.release_status = Some("failed".into());
+        let quiescing = crate::worker_claims::ClaimsState::Quiescing {
+            since: "2026-09-27T11:50:00+00:00".into(),
+            revision: 3,
+            ttl_seconds: Some(24),
+        };
+        let checks = evaluate_with_worker_claims(&f, Some(&quiescing));
+        assert_eq!(find(&checks, "release").state, State::Missing);
+        let claims = find(&checks, "worker-claims");
+        assert_eq!(claims.state, State::Missing);
+        assert!(
+            claims.detail.contains("marker expires in 24s"),
+            "the row must name the marker expiry: {}",
+            claims.detail
+        );
+    }
+
     /// The one check this issue is about, pulled out of a full `evaluate`.
     fn model_pin(f: &Facts) -> Check {
         find(&evaluate(f), "model-pin").clone()
