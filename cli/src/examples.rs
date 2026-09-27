@@ -78,7 +78,6 @@ const UPGRADER_TOKEN_SECRET: &str = "sre-bot-upgrader-token";
 const SELF_UPGRADE_KUBECONFIG_SECRET_KEY: &str = "SELF_UPGRADE_KUBECONFIG";
 const PLATFORM_UPGRADER_IDENTITY: &str = "curie-platform-upgrader";
 const PLATFORM_UPGRADE_CRONJOB_NAME: &str = "platform-upgrade";
-const SELF_UPGRADE_CRONJOB_NAME: &str = "sre-bot-self-upgrade";
 const PLATFORM_UPGRADE_CONFIGMAP: &str = "platform-upgrade";
 // The project whose releases define "newest" for the platform upgrade. Fixed
 // rather than a flag: this installer installs THIS project's example, and an
@@ -634,6 +633,10 @@ pub async fn install_sre_bot(opts: SreBotInstallOpts) -> Result<SreBotInstallRes
                  from it when a human approves one"
             ));
             lines.push(format!(
+                "leave {UPGRADE_GATE} unarmed: no self-upgrade CronJob is applied, so \
+                 {SELF_UPGRADE_CRONJOB_ENV} is rendered empty and {UPGRADE_TOOL} is not allowed"
+            ));
+            lines.push(format!(
                 "kubectl wait --namespace {} --for=jsonpath={{.data.token}} \
                  secret/{UPGRADER_TOKEN_SECRET} --timeout={READER_TOKEN_TIMEOUT}",
                 identity.namespace
@@ -882,6 +885,16 @@ fn grafana_connector_token_present(secret: &serde_json::Value) -> bool {
     !token.trim().is_empty()
 }
 
+/// Every object `--platform-upgrade` applies, in apply order. One list so the
+/// armed gate set can be checked against it: #2288 shipped `upgrade_self` armed
+/// while this path never applied the CronJob it starts.
+const UPGRADE_PATH_FILES: [&str; 4] = [
+    "manifests/upgrade-role.yaml",
+    "manifests/platform-upgrade-role.yaml",
+    "manifests/platform-upgrade-configmap.yaml",
+    "manifests/platform-upgrade-cronjob.yaml",
+];
+
 /// Apply the upgrade path's objects and mint the connector's kubeconfig.
 ///
 /// Order within this function matters: the identities come first, then the
@@ -894,12 +907,7 @@ async fn apply_upgrade_path(
     chart: &Path,
     namespace: &str,
 ) -> Result<String> {
-    for file in [
-        "manifests/upgrade-role.yaml",
-        "manifests/platform-upgrade-role.yaml",
-        "manifests/platform-upgrade-configmap.yaml",
-        "manifests/platform-upgrade-cronjob.yaml",
-    ] {
+    for file in UPGRADE_PATH_FILES {
         let command = InstallCommand {
             program: "kubectl",
             args: vec![plain("apply"), plain("-f"), CommandArg::BundleFile(file)],
@@ -2481,11 +2489,14 @@ fn runtime_connector_declaration(
     // an operator's decision made while reading that file, never a side effect
     // of running an installer.
     match upgrade_digest {
-        // Kept, with both CronJob names filled in. The bundle ships
-        // PLATFORM_UPGRADE_CRONJOB empty and SELF_UPGRADE_CRONJOB defaulted, and
-        // an install that hand-edits either finds the worker's connector
-        // reconciler putting the declaration back within the minute -- so the
-        // installer is the only thing that can make these real.
+        // Kept for upgrade_platform only. The bundle ships
+        // PLATFORM_UPGRADE_CRONJOB empty, and an install that hand-edits it finds
+        // the worker's connector reconciler putting the declaration back within
+        // the minute -- so the installer is the only thing that can make it real.
+        // SELF_UPGRADE_CRONJOB is rendered empty on purpose (#2288): this path
+        // never applies the self-upgrade CronJob, so naming it would arm a verb
+        // that spends a human approval and then reports the Job missing. Empty
+        // makes the connector refuse every upgrade_self call.
         Some(digest) => {
             let upgrade = connectors
                 .get_mut("self-upgrade")
@@ -2512,7 +2523,7 @@ fn runtime_connector_declaration(
             );
             env.insert(
                 SELF_UPGRADE_CRONJOB_ENV.to_string(),
-                serde_json::Value::String(SELF_UPGRADE_CRONJOB_NAME.to_string()),
+                serde_json::Value::String(String::new()),
             );
         }
         // Stripped exactly as before this flag existed: inert without the Job,
@@ -2603,6 +2614,10 @@ fn runtime_plugin_manifest(source: &[u8], upgrade_enabled: bool) -> Result<Vec<u
             bail!("embedded SRE bot toolPolicy.allow must contain {tool}");
         }
     }
+    // upgrade_self is never armed: no install path applies the CronJob it
+    // starts (#2288). Out of allow, the tool policy refuses it before any
+    // approval card is raised.
+    allow.retain(|entry| entry.as_str() != Some(UPGRADE_TOOL));
     if !upgrade_enabled {
         // Default install strips connectors.self-upgrade. Any leftover
         // self-upgrade/* allow entry fails the bundle validator with
@@ -2618,7 +2633,6 @@ fn runtime_plugin_manifest(source: &[u8], upgrade_enabled: bool) -> Result<Vec<u
     let mut kept =
         vec![serde_json::json!({"gate": PLATFORM_PUBLISH_GATE, "route": "sre-approvals"})];
     if upgrade_enabled {
-        kept.push(serde_json::json!({"gate": UPGRADE_GATE, "route": "sre-approvals"}));
         kept.push(serde_json::json!({"gate": PLATFORM_UPGRADE_GATE, "route": "sre-approvals"}));
     }
     for tool in KUBERNETES_MUTATION_TOOLS {
@@ -3062,7 +3076,7 @@ mod tests {
     }
 
     #[test]
-    fn the_upgrade_path_on_fills_in_both_cronjob_names() {
+    fn the_upgrade_path_on_fills_in_only_the_platform_cronjob_name() {
         // The whole reason this flag exists. The bundle ships
         // PLATFORM_UPGRADE_CRONJOB empty, and the worker's connector reconciler
         // puts that declaration back within the minute over anything set by
@@ -3080,7 +3094,9 @@ mod tests {
             env[PLATFORM_UPGRADE_CRONJOB_ENV],
             PLATFORM_UPGRADE_CRONJOB_NAME
         );
-        assert_eq!(env[SELF_UPGRADE_CRONJOB_ENV], SELF_UPGRADE_CRONJOB_NAME);
+        // #2288: the self-upgrade CronJob is never applied, so its name is
+        // rendered empty and the connector refuses upgrade_self outright.
+        assert_eq!(env[SELF_UPGRADE_CRONJOB_ENV], "");
         // `build:` records a LOCAL image id the cluster tier refuses, so a kept
         // connector without a resolved digest is one that can never start.
         assert!(parsed["connectors"]["self-upgrade"].get("build").is_none());
@@ -3091,7 +3107,7 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_upgrade_connector_keeps_exactly_its_two_gates() {
+    fn a_kept_upgrade_connector_keeps_exactly_its_platform_gate() {
         // A gate naming a stripped connector fails validation for everyone; a
         // kept connector with no gate is an ungated write. Both are decided from
         // the same condition, so both are asserted here.
@@ -3104,25 +3120,102 @@ mod tests {
             .iter()
             .map(|gate| gate["gate"].as_str().unwrap())
             .collect();
-        assert!(gates.contains(&UPGRADE_GATE));
+        assert!(!gates.contains(&UPGRADE_GATE));
         assert!(gates.contains(&PLATFORM_UPGRADE_GATE));
         assert!(gates.contains(&PLATFORM_PUBLISH_GATE));
         let mut expected = always_retained_gate_set();
-        expected.insert((UPGRADE_GATE.to_string(), "sre-approvals".to_string()));
         expected.insert((
             PLATFORM_UPGRADE_GATE.to_string(),
             "sre-approvals".to_string(),
         ));
         assert_eq!(routed_gates(&parsed), expected);
-        assert_eq!(gates.len(), 9);
+        assert_eq!(gates.len(), 8);
         let allow = parsed["toolPolicy"]["allow"].as_array().unwrap();
         assert!(allow
             .iter()
             .any(|tool| tool.as_str() == Some(LATEST_RELEASE_TOOL)));
-        assert!(allow.iter().any(|tool| tool.as_str() == Some(UPGRADE_TOOL)));
+        assert!(!allow.iter().any(|tool| tool.as_str() == Some(UPGRADE_TOOL)));
         assert!(allow
             .iter()
             .any(|tool| tool.as_str() == Some(PLATFORM_UPGRADE_TOOL)));
+    }
+
+    #[test]
+    fn every_armed_upgrade_gate_starts_a_cronjob_the_upgrade_path_applies() {
+        // #2288: upgrade_self was armed while apply_upgrade_path never applied
+        // its CronJob. Tie the armed gates, the connector env naming each
+        // CronJob, and the applied file set together so they cannot drift.
+        // Each self-upgrade gate: (env naming its CronJob, applied file, the
+        // rendered object's name when that file is applied).
+        let platform = render_platform_cronjob(
+            PLATFORM_UPGRADE_CRONJOB_YAML,
+            "curie",
+            "curie",
+            PLATFORM_UPGRADE_SOURCE_REPO,
+        )
+        .unwrap();
+        let platform: serde_json::Value = serde_norway::from_slice(&platform).unwrap();
+        let platform_name = platform["metadata"]["name"].as_str().unwrap().to_string();
+        let targets = [
+            (
+                UPGRADE_GATE,
+                SELF_UPGRADE_CRONJOB_ENV,
+                "manifests/self-upgrade-cronjob.yaml",
+                None,
+            ),
+            (
+                PLATFORM_UPGRADE_GATE,
+                PLATFORM_UPGRADE_CRONJOB_ENV,
+                "manifests/platform-upgrade-cronjob.yaml",
+                Some(platform_name),
+            ),
+        ];
+
+        let manifest =
+            runtime_plugin_manifest(bundle_file(".claude-plugin/plugin.json"), true).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+        let armed: BTreeSet<&str> = manifest["approvalPolicy"]["gates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|gate| gate["gate"].as_str())
+            .filter(|gate| gate.starts_with("mcp__self-upgrade__"))
+            .collect();
+        let allow = manifest["toolPolicy"]["allow"].as_array().unwrap();
+        let connectors = runtime_connector_declaration(
+            bundle_file("connectors.yaml"),
+            "sha256:tempo",
+            OBSERVABILITY_NAMESPACE,
+            Some("sha256:upgrade"),
+        )
+        .unwrap();
+        let connectors: serde_json::Value = serde_norway::from_slice(&connectors).unwrap();
+        let env = &connectors["connectors"]["self-upgrade"]["env"];
+
+        for (gate, env_key, file, rendered_name) in &targets {
+            let applied = UPGRADE_PATH_FILES.contains(file);
+            let tool = gate.replacen("mcp__self-upgrade__", "self-upgrade/", 1);
+            let allowed = allow.iter().any(|entry| entry.as_str() == Some(&tool));
+            assert_eq!(
+                armed.contains(gate),
+                applied,
+                "{gate} armed vs {file} applied"
+            );
+            assert_eq!(allowed, applied, "{tool} allowed vs {file} applied");
+            match applied {
+                true => assert_eq!(
+                    env[*env_key].as_str(),
+                    rendered_name.as_deref(),
+                    "{env_key} must name the applied CronJob"
+                ),
+                false => assert_eq!(env[*env_key], "", "{env_key} must be empty"),
+            }
+        }
+        let known: BTreeSet<&str> = targets.iter().map(|target| target.0).collect();
+        assert!(
+            armed.is_subset(&known),
+            "unclassified upgrade gate: {armed:?}"
+        );
     }
 
     fn test_identity() -> InstallIdentity {
@@ -3556,13 +3649,12 @@ mod tests {
         let on = runtime_plugin_manifest(source, true).unwrap();
         let on: serde_json::Value = serde_json::from_slice(&on).unwrap();
         let mut expected = always_retained_gate_set();
-        expected.insert((UPGRADE_GATE.to_string(), "sre-approvals".to_string()));
         expected.insert((
             PLATFORM_UPGRADE_GATE.to_string(),
             "sre-approvals".to_string(),
         ));
         assert_eq!(routed_gates(&on), expected);
-        assert_eq!(on["approvalPolicy"]["gates"].as_array().unwrap().len(), 9);
+        assert_eq!(on["approvalPolicy"]["gates"].as_array().unwrap().len(), 8);
     }
 
     #[test]
