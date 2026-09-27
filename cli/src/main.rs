@@ -349,6 +349,48 @@ struct ClusterAgentTarget {
     dry_run: bool,
 }
 
+#[derive(Subcommand, Debug)]
+enum LocalHooksAction {
+    /// Show an agent's hook partition and source binding maps.
+    Show {
+        #[command(flatten)]
+        target: AgentTarget<LocalTier>,
+    },
+    /// Replace one or both hook maps from a JSON file. An empty map clears it.
+    Configure {
+        #[command(flatten)]
+        target: AgentTarget<LocalTier>,
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+    },
+    /// Read the derived hook signing secret for an agent.
+    Secret {
+        #[command(flatten)]
+        target: AgentTarget<LocalTier>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ClusterHooksAction {
+    /// Show an agent's hook partition and source binding maps.
+    Show {
+        #[command(flatten)]
+        target: ClusterAgentTarget,
+    },
+    /// Replace one or both hook maps from a JSON file. An empty map clears it.
+    Configure {
+        #[command(flatten)]
+        target: ClusterAgentTarget,
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+    },
+    /// Read the derived hook signing secret for an agent.
+    Secret {
+        #[command(flatten)]
+        target: ClusterAgentTarget,
+    },
+}
+
 /// Stand up the connectors this version declares, and prune what it dropped.
 ///
 /// Split across the two components on purpose (ADR-0086): the API RENDERS the
@@ -1998,6 +2040,11 @@ enum LocalAction {
         #[command(flatten)]
         target: AgentTarget<LocalTier>,
     },
+    /// Manage an agent's hook configuration and signing secret.
+    Hooks {
+        #[command(subcommand)]
+        action: LocalHooksAction,
+    },
     /// Show what an agent has learned (its memory log; `GET /agents/{id}/memory`).
     /// `--add <content>` seeds an operator-authored record; a fresh session is
     /// required before it is injected at boot.
@@ -3111,6 +3158,11 @@ enum ClusterAction {
         #[command(flatten)]
         target: ClusterAgentTarget,
     },
+    /// Manage an agent's hook configuration and signing secret.
+    Hooks {
+        #[command(subcommand)]
+        action: ClusterHooksAction,
+    },
     /// Show what an agent has learned (its memory log; `GET /agents/{id}/memory`).
     /// `--add <content>` seeds an operator-authored record; a fresh session is
     /// required before it is injected at boot.
@@ -3194,8 +3246,16 @@ impl ClusterTargetSources {
         let Some(("cluster", cluster_matches)) = matches.subcommand() else {
             return Self::default();
         };
-        let Some((_, action_matches)) = cluster_matches.subcommand() else {
+        let Some((action_name, action_matches)) = cluster_matches.subcommand() else {
             return Self::default();
+        };
+        let action_matches = if action_name == "hooks" {
+            let Some((_, hook_matches)) = action_matches.subcommand() else {
+                return Self::default();
+            };
+            hook_matches
+        } else {
+            action_matches
         };
         Self {
             namespace_supplied: matches!(
@@ -3270,6 +3330,17 @@ fn cluster_action_target(action: &ClusterAction) -> (Option<&str>, Option<&str>)
             Some(target.conn.namespace.as_str()),
             Some(target.conn.release.as_str()),
         ),
+        ClusterAction::Hooks { action } => {
+            let target = match action {
+                ClusterHooksAction::Show { target }
+                | ClusterHooksAction::Configure { target, .. }
+                | ClusterHooksAction::Secret { target } => target,
+            };
+            (
+                Some(target.conn.namespace.as_str()),
+                Some(target.conn.release.as_str()),
+            )
+        }
     }
 }
 
@@ -3366,6 +3437,15 @@ fn retarget_cluster_action(
         ClusterAction::Versions { target }
         | ClusterAction::Memory { target, .. }
         | ClusterAction::Approvals { target, .. } => {
+            replace(&mut target.conn.namespace, &namespace);
+            replace(&mut target.conn.release, &release);
+        }
+        ClusterAction::Hooks { action } => {
+            let target = match action {
+                ClusterHooksAction::Show { target }
+                | ClusterHooksAction::Configure { target, .. }
+                | ClusterHooksAction::Secret { target } => target,
+            };
             replace(&mut target.conn.namespace, &namespace);
             replace(&mut target.conn.release, &release);
         }
@@ -4466,6 +4546,17 @@ async fn run(command: Option<Command>) -> Result<()> {
                 emit(local::with_deploy_unreachable_hint(result, &local_api_url).await?)
             }
             LocalAction::Versions { target } => emit(commands::versions(target.into()).await?),
+            LocalAction::Hooks { action } => match action {
+                LocalHooksAction::Show { target } => {
+                    emit(commands::hooks_show(target.into()).await?)
+                }
+                LocalHooksAction::Configure { target, file } => {
+                    emit(commands::hooks_configure(target.into(), &file).await?)
+                }
+                LocalHooksAction::Secret { target } => {
+                    emit(commands::hooks_secret(target.into()).await?)
+                }
+            },
             LocalAction::WorkItems {
                 id,
                 agent,
@@ -5878,6 +5969,37 @@ async fn run(command: Option<Command>) -> Result<()> {
                     })
                     .await?,
                 )
+            }
+            ClusterAction::Hooks { action } => {
+                let (target, file, verb) = match action {
+                    ClusterHooksAction::Show { target } => (target, None, "show"),
+                    ClusterHooksAction::Configure { target, file } => {
+                        (target, Some(file), "configure")
+                    }
+                    ClusterHooksAction::Secret { target } => (target, None, "secret"),
+                };
+                let ClusterAgentTarget {
+                    agent,
+                    conn,
+                    dry_run,
+                } = target;
+                let (api_url, api_key, _cluster_api_pf) =
+                    resolve_cluster_conn(conn, dry_run).await?;
+                let opts = AgentActionOpts {
+                    api_url,
+                    api_key,
+                    agent,
+                    dry_run,
+                };
+                match verb {
+                    "show" => emit(commands::hooks_show(opts).await?),
+                    "configure" => emit(commands::hooks_configure(
+                        opts,
+                        &file.expect("configure supplies a file"),
+                    ).await?),
+                    "secret" => emit(commands::hooks_secret(opts).await?),
+                    _ => unreachable!(),
+                }
             }
             ClusterAction::Memory { target, add } => {
                 let ClusterAgentTarget {
