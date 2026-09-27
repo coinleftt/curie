@@ -4196,7 +4196,7 @@ export const commandManifest = {
             {
               "env": "CURIE_API_KEY",
               "global": false,
-              "help": "Platform API key for the default-channel lookup. Omit to read the release's own key from its chart Secret",
+              "help": "Platform API key. It authenticates the relay poll and a missing-channel lookup. Omit to read the release's own key from its chart Secret",
               "id": "api_key",
               "long": "api-key",
               "positional": false,
