@@ -1136,7 +1136,7 @@ forks work with no further step.
 A missing input is refused, with every missing name listed, before the cluster
 or GitHub is touched. `curie dev factory-e2e run --scenario <name>` runs the
 preflight and then one scenario driver: `issue-to-pr`, `revision`,
-`cancel-waiting`, `cancel-running` or `evaluation`. `evaluation` runs six
+`cancel-waiting`, `cancel-running`, `quiesce` or `evaluation`. `evaluation` runs six
 labelled tickets (a correct change, a seeded failing test, an ambiguous
 request, an unavailable dependency, an execution-deadline budget, and a
 malicious instruction) on the configured model and again on
@@ -1236,6 +1236,24 @@ of the three runs `curie cluster work-items <id> --json` at every state it
 judges and requires exit 0 with the api's state and request statuses, and
 requires exit 1 for an unknown id. The evidence records every id, delivery,
 comment, pull request head, status seen with its time, and CLI read.
+
+`run --scenario quiesce [--issue-file <ticket.md>]` is the live proof for
+issue #3198 that the worker upgrade quiesce marker clears after a cancelled
+`helm upgrade`. It needs `CURIE_FACTORY_MODEL_API_KEY` so the seed request
+stays `running`. Path A runs `helm upgrade --reuse-values --timeout 60s`, which
+the client cancels while the drain gate waits; the marker must stay
+`quiescing` on a lease no longer than one drain lease, `curie doctor` must
+report `marker expires in`, and a second labelled issue must stay `waiting`
+with the paused-for-upgrade status comment. Deleting the drain Job and
+force-deleting its pod must clear the marker within one lease plus slack, and
+the queued request must then leave `waiting`. Path B deletes the drain Job
+while a 20 minute upgrade still waits; the marker must clear within 10 s and
+the drain pod log must say the gate was terminated. The evidence judges
+`seed_status_before`, `baseline_state`, the `path_a_*` helm exit, elapsed,
+state and ttl fields, `doctor_worker_claims_line`, `paused_comment_found`,
+`queued_status_while_quiesced`, `path_a_clear_seconds`,
+`queued_status_after_release`, the `path_b_*` clear, log and helm exit
+fields, and `final_state`.
 
 ### Reading work item outcomes
 
