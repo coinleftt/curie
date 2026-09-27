@@ -55,10 +55,11 @@
           "side_effect_halted",
           "idle",
           "interrupted",
-          "deadline_halted"
+          "deadline_halted",
+          "capacity_wait_expired"
         ]
       },
-      "cardinality_bound": 192
+      "cardinality_bound": 216
     },
     "curie.turn.duration": {
       "type": "histogram",
@@ -88,10 +89,11 @@
           "side_effect_halted",
           "idle",
           "interrupted",
-          "deadline_halted"
+          "deadline_halted",
+          "capacity_wait_expired"
         ]
       },
-      "cardinality_bound": 192
+      "cardinality_bound": 216
     },
     "curie.history.resume.cache_read": {
       "type": "histogram",
@@ -158,10 +160,11 @@
           "pending",
           "ack",
           "retry",
-          "dead-letter"
+          "dead-letter",
+          "queued"
         ]
       },
-      "cardinality_bound": 90
+      "cardinality_bound": 105
     },
     "curie.queue.process": {
       "type": "counter",
@@ -187,10 +190,11 @@
           "pending",
           "ack",
           "retry",
-          "dead-letter"
+          "dead-letter",
+          "queued"
         ]
       },
-      "cardinality_bound": 90
+      "cardinality_bound": 105
     },
     "curie.queue.settle": {
       "type": "counter",
@@ -216,10 +220,11 @@
           "pending",
           "ack",
           "retry",
-          "dead-letter"
+          "dead-letter",
+          "queued"
         ]
       },
-      "cardinality_bound": 90
+      "cardinality_bound": 105
     },
     "curie.queue.retry": {
       "type": "counter",
@@ -268,10 +273,11 @@
           "pending",
           "ack",
           "retry",
-          "dead-letter"
+          "dead-letter",
+          "queued"
         ]
       },
-      "cardinality_bound": 90
+      "cardinality_bound": 105
     },
     "curie.queue.wait.duration": {
       "type": "histogram",
@@ -297,10 +303,11 @@
           "pending",
           "ack",
           "retry",
-          "dead-letter"
+          "dead-letter",
+          "queued"
         ]
       },
-      "cardinality_bound": 90
+      "cardinality_bound": 105
     },
     "curie.queue.process.duration": {
       "type": "histogram",
@@ -326,10 +333,11 @@
           "pending",
           "ack",
           "retry",
-          "dead-letter"
+          "dead-letter",
+          "queued"
         ]
       },
-      "cardinality_bound": 90
+      "cardinality_bound": 105
     },
     "curie.queue.message.age": {
       "type": "histogram",
@@ -355,10 +363,11 @@
           "pending",
           "ack",
           "retry",
-          "dead-letter"
+          "dead-letter",
+          "queued"
         ]
       },
-      "cardinality_bound": 90
+      "cardinality_bound": 105
     },
     "curie.queue.pending": {
       "type": "gauge",
@@ -384,10 +393,11 @@
           "pending",
           "ack",
           "retry",
-          "dead-letter"
+          "dead-letter",
+          "queued"
         ]
       },
-      "cardinality_bound": 90
+      "cardinality_bound": 105
     },
     "curie.queue.lag": {
       "type": "gauge",
@@ -413,10 +423,11 @@
           "pending",
           "ack",
           "retry",
-          "dead-letter"
+          "dead-letter",
+          "queued"
         ]
       },
-      "cardinality_bound": 90
+      "cardinality_bound": 105
     },
     "curie.queue.depth": {
       "type": "gauge",
@@ -442,10 +453,11 @@
           "pending",
           "ack",
           "retry",
-          "dead-letter"
+          "dead-letter",
+          "queued"
         ]
       },
-      "cardinality_bound": 90
+      "cardinality_bound": 105
     },
     "curie.thread.lock.wait.duration": {
       "type": "histogram",
@@ -775,7 +787,8 @@
           "interrupt",
           "reset",
           "status",
-          "timeout"
+          "timeout",
+          "turn-admit"
         ],
         "role": [
           "client"
@@ -787,7 +800,7 @@
           "timeout"
         ]
       },
-      "cardinality_bound": 24
+      "cardinality_bound": 28
     },
     "curie.runner.rpc.result": {
       "type": "counter",
@@ -804,7 +817,8 @@
           "interrupt",
           "reset",
           "status",
-          "timeout"
+          "timeout",
+          "turn-admit"
         ],
         "role": [
           "client"
@@ -816,7 +830,7 @@
           "timeout"
         ]
       },
-      "cardinality_bound": 24
+      "cardinality_bound": 28
     },
     "curie.approval.lifecycle": {
       "type": "counter",
@@ -922,6 +936,26 @@
         ]
       },
       "cardinality_bound": 1
+    },
+    "curie.capacity.wait": {
+      "type": "gauge",
+      "unit": "{turn}",
+      "description": "Interactive turns by persisted capacity wait state.",
+      "monotonic": false,
+      "attributes": {
+        "service.name": [
+          "curie-worker"
+        ],
+        "source": [
+          "worker"
+        ],
+        "state": [
+          "waiting",
+          "active",
+          "expired"
+        ]
+      },
+      "cardinality_bound": 3
     },
     "curie.reply.delivery": {
       "type": "counter",
