@@ -45,6 +45,15 @@
         "expected": "kube-system",
         "case_sensitive": false
       }
+    },
+    {
+      "id": "confirms-in-the-reply-without-claiming-it-cannot-post",
+      "input": "[FIRING:1] CurieSyntheticDeliveryCheck (synthetic delivery check)\nDescription: This is a synthetic test alert. Please reply in this channel with one line confirming it arrived.",
+      "grader": {
+        "kind": "regex",
+        "expected": "(?is)^[^a-z0-9]{0,8}(received|confirmed|arrived|got (it|this|the)|acknowledged|this (test |synthetic )?alert (has )?arrived|the (test |synthetic )?alert (has )?arrived|delivery (check )?(confirmed|received|worked|succeeded))",
+        "case_sensitive": false
+      }
     }
   ]
 }
