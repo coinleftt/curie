@@ -3555,6 +3555,250 @@ struct RunningGvisorEventWatch {
     existing_event_uids: BTreeSet<String>,
 }
 
+fn admission_text<'a>(value: &'a serde_json::Value, pointer: &str) -> &'a str {
+    value
+        .pointer(pointer)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+}
+
+fn admission_event_count(event: &serde_json::Value) -> u64 {
+    ["/count", "/series/count"]
+        .into_iter()
+        .filter_map(|pointer| event.pointer(pointer).and_then(|v| v.as_u64()))
+        .max()
+        .unwrap_or(0)
+}
+
+fn admission_event_time(event: &serde_json::Value) -> Option<time::OffsetDateTime> {
+    [
+        "/series/lastObservedTime",
+        "/lastTimestamp",
+        "/eventTime",
+        "/metadata/creationTimestamp",
+    ]
+    .into_iter()
+    .filter_map(|pointer| {
+        time::OffsetDateTime::parse(
+            admission_text(event, pointer),
+            &time::format_description::well_known::Rfc3339,
+        )
+        .ok()
+    })
+    .max()
+}
+
+fn fresh_admission_event(event: &serde_json::Value, baseline: &[serde_json::Value]) -> bool {
+    let uid = admission_text(event, "/metadata/uid");
+    if uid.is_empty() {
+        return false;
+    }
+    // The complete snapshot is the freshness boundary. Comparing the cluster's
+    // timestamps to this host's clock would discard events under clock skew.
+    match baseline
+        .iter()
+        .find(|old| admission_text(old, "/metadata/uid") == uid)
+    {
+        Some(old) => {
+            admission_event_count(event) > admission_event_count(old)
+                || admission_event_time(event) > admission_event_time(old)
+        }
+        None => true,
+    }
+}
+
+fn admission_controller_owned(
+    controller: &serde_json::Value,
+    common: &CommonOpts,
+    namespace: &str,
+) -> bool {
+    if admission_text(controller, "/metadata/namespace") != namespace {
+        return false;
+    }
+    if namespace != common.namespace
+        && (namespace != CONTROLLER_DEPLOYMENT_NAMESPACE
+            || admission_text(controller, "/kind") != "Deployment"
+            || admission_text(controller, "/metadata/name") != CONTROLLER_DEPLOYMENT_NAME)
+    {
+        return false;
+    }
+    if admission_text(
+        controller,
+        "/metadata/annotations/meta.helm.sh~1release-name",
+    ) == common.release
+        && admission_text(
+            controller,
+            "/metadata/annotations/meta.helm.sh~1release-namespace",
+        ) == common.namespace
+    {
+        return true;
+    }
+    // Helm creates hook manifests directly, without the ownership annotations
+    // it adds to ordinary resources. The chart supplies their release labels.
+    admission_text(controller, "/kind") == "Job"
+        && admission_text(controller, "/metadata/labels/app.kubernetes.io~1instance")
+            == common.release
+        && admission_text(controller, "/metadata/labels/app.kubernetes.io~1managed-by") == "Helm"
+        && admission_text(controller, "/metadata/annotations/helm.sh~1hook")
+            .split(',')
+            .any(|hook| {
+                matches!(
+                    hook.trim(),
+                    "pre-install" | "post-install" | "pre-upgrade" | "post-upgrade"
+                )
+            })
+}
+
+fn admission_event_owned(
+    event: &serde_json::Value,
+    controllers: &[serde_json::Value],
+    common: &CommonOpts,
+    namespace: &str,
+) -> bool {
+    let uid = admission_text(event, "/involvedObject/uid");
+    let kind = admission_text(event, "/involvedObject/kind");
+    let name = admission_text(event, "/involvedObject/name");
+    if uid.is_empty()
+        || name.is_empty()
+        || admission_text(event, "/involvedObject/namespace") != namespace
+        || !matches!(
+            kind,
+            "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet" | "Job"
+        )
+    {
+        return false;
+    }
+    let Some(controller) = controllers.iter().find(|controller| {
+        admission_text(controller, "/metadata/uid") == uid
+            && admission_text(controller, "/metadata/name") == name
+            && admission_text(controller, "/metadata/namespace") == namespace
+            && admission_text(controller, "/kind") == kind
+    }) else {
+        return false;
+    };
+    if kind != "ReplicaSet" {
+        return admission_controller_owned(controller, common, namespace);
+    }
+    controller
+        .pointer("/metadata/ownerReferences")
+        .and_then(|owners| owners.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|owner| {
+            owner.get("controller").and_then(|v| v.as_bool()) == Some(true)
+                && admission_text(owner, "/kind") == "Deployment"
+                && !admission_text(owner, "/uid").is_empty()
+        })
+        .any(|owner| {
+            controllers.iter().any(|parent| {
+                admission_text(parent, "/kind") == "Deployment"
+                    && admission_text(parent, "/metadata/uid") == admission_text(owner, "/uid")
+                    && admission_text(parent, "/metadata/name") == admission_text(owner, "/name")
+                    && admission_controller_owned(parent, common, namespace)
+            })
+        })
+}
+
+async fn admission_objects(namespace: &str, resources: &str) -> Option<Vec<serde_json::Value>> {
+    let mut args = vec![
+        plain("get"),
+        plain(resources),
+        plain("-n"),
+        plain(namespace),
+    ];
+    if resources == "events" {
+        args.extend([plain("--field-selector"), plain("reason=FailedCreate")]);
+    }
+    args.extend([plain("-o"), plain("json")]);
+    let cmd = OpsCommand::new("kubectl", args);
+    let (ok, out, _) = tokio::time::timeout(Duration::from_secs(3), run_capture(&cmd))
+        .await
+        .ok()?
+        .ok()?;
+    if !ok {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(&out)
+        .ok()?
+        .get("items")?
+        .as_array()
+        .cloned()
+}
+
+fn admission_rejection_excerpt(message: &str) -> String {
+    let printable: String = message
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(character, '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let single_line = printable.split_whitespace().collect::<Vec<_>>().join(" ");
+    let redacted = crate::connectors::redact_last_log(&single_line, &BTreeMap::new());
+    let mut excerpt: String = redacted.chars().take(1024).collect();
+    if redacted.chars().count() > 1024 {
+        excerpt.push_str("...");
+    }
+    excerpt
+}
+
+async fn observe_admission_rejection(
+    common: &CommonOpts,
+    namespace: &str,
+    baseline: Option<Vec<serde_json::Value>>,
+    gvisor_job: Option<&str>,
+) -> String {
+    let Some(baseline) = baseline else {
+        crate::ui::ui().plumbing(&format!(
+            "admission event snapshot unavailable in namespace {namespace}; retaining Helm wait for that namespace"
+        ));
+        return std::future::pending().await;
+    };
+    loop {
+        if let Some(events) = admission_objects(namespace, "events").await {
+            let candidates: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    let message = admission_text(event, "/message");
+                    admission_text(event, "/reason") == "FailedCreate"
+                        && message.to_ascii_lowercase().contains("is forbidden:")
+                        && fresh_admission_event(event, &baseline)
+                        // The existing gVisor observer owns its inference and retry.
+                        && !(namespace == common.namespace && gvisor_job.is_some_and(|job| {
+                            admission_text(event, "/involvedObject/kind") == "Job"
+                                && admission_text(event, "/involvedObject/name") == job
+                        }) && message.contains("RuntimeClass \"gvisor\" not found"))
+                })
+                .collect();
+            if !candidates.is_empty() {
+                if let Some(controllers) = admission_objects(
+                    namespace,
+                    "deployments,statefulsets,daemonsets,replicasets,jobs",
+                )
+                .await
+                {
+                    for event in candidates {
+                        if admission_event_owned(event, &controllers, common, namespace) {
+                            return format!(
+                                "FailedCreate on {}/{} in namespace {namespace}: \"{}\"",
+                                admission_text(event, "/involvedObject/kind"),
+                                admission_text(event, "/involvedObject/name"),
+                                admission_rejection_excerpt(admission_text(event, "/message")),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 fn gvisor_event_selector(namespace: &str, job: &str) -> String {
     format!(
         "involvedObject.kind=Job,involvedObject.namespace={namespace},involvedObject.name={job},reason=FailedCreate"
@@ -3746,32 +3990,61 @@ async fn terminate_helm_process(child: &mut Child) -> std::io::Result<std::proce
     terminate_process(child).await
 }
 
-enum GvisorInstallRace {
+enum InstallRace {
     Helm(std::io::Result<std::process::ExitStatus>),
     RuntimeClassRejected(String),
+    AdmissionRejected(String),
 }
 
-enum GvisorInstallOutcome {
+enum InstallOutcome {
     Installed,
     RuntimeClassRejected {
         rejection: String,
         step: crate::ui::Step,
     },
+    AdmissionRejected(String),
 }
 
-async fn run_install_with_gvisor_observer(
+fn admission_install_error(rejection: String, invocation: UpInvocation) -> anyhow::Error {
+    crate::exit::CliError::failure(format!(
+        "Helm installation stopped after Kubernetes rejected pod creation: {rejection}"
+    ))
+    .with_fix(match invocation {
+        UpInvocation::ClusterUp => "correct the reported admission rejection and rerun `curie cluster up`",
+        UpInvocation::Apply => "correct the reported admission rejection in `curie.yaml` or the cluster and rerun `curie apply`",
+    })
+    .into()
+}
+
+async fn run_install_with_observers(
     cl: &crate::ui::Checklist,
     label: &str,
     ok_detail: &str,
     cmd: &OpsCommand,
-    namespace: &str,
-    job: &str,
-    namespace_existed_before_install: bool,
-) -> Result<GvisorInstallOutcome> {
+    common: &CommonOpts,
+    job: Option<&str>,
+    namespace_states: &[(String, bool)],
+) -> Result<InstallOutcome> {
     let ui = crate::ui::ui();
+    let namespace = &common.namespace;
     ui.plumbing(&format!("+ {}", cmd.display()));
     let step = cl.step(label);
-    let mut watch_start = if namespace_existed_before_install {
+    let namespace_existed_before_install = namespace_states
+        .iter()
+        .find_map(|(name, existed)| (name == namespace).then_some(*existed))
+        .expect("install observers include the release namespace");
+    let admission_baselines = futures_util::future::join_all(namespace_states.iter().map(
+        |(namespace, existed)| async move {
+            let baseline = if *existed {
+                admission_objects(namespace, "events").await
+            } else {
+                Some(Vec::new())
+            };
+            (namespace.clone(), baseline)
+        },
+    ))
+    .await;
+    let mut watch_start = if let Some(job) = job.filter(|_| namespace_existed_before_install) {
         Some(match gvisor_existing_event_uids(namespace, job).await {
             Some(existing_event_uids) => {
                 start_gvisor_event_watch(namespace, job, existing_event_uids)
@@ -3793,7 +4066,7 @@ async fn run_install_with_gvisor_observer(
     };
 
     let mut early_helm_status = None;
-    if !namespace_existed_before_install {
+    if let Some(job) = job.filter(|_| !namespace_existed_before_install) {
         // Helm owns `--create-namespace`. Wait for that one object, then use a
         // single list and watch request that cannot lose an Event between calls.
         let mut retry_delay = Duration::from_millis(50);
@@ -3830,52 +4103,58 @@ async fn run_install_with_gvisor_observer(
         }
     }
 
-    let watch_start = watch_start.unwrap_or(GvisorEventWatchStart::Unavailable);
-    let mut watch = None;
+    let mut watch = match watch_start {
+        Some(GvisorEventWatchStart::Watching(watch)) => Some(*watch),
+        _ => None,
+    };
     let race = if let Some(status) = early_helm_status {
-        GvisorInstallRace::Helm(status)
+        InstallRace::Helm(status)
     } else {
-        match watch_start {
-            GvisorEventWatchStart::Watching(running_watch) => {
-                watch = Some(*running_watch);
-                let running_watch = watch.as_mut().expect("watch was just installed");
-                let existing_event_uids = running_watch.existing_event_uids.clone();
-                loop {
-                    let outcome = tokio::select! {
-                        status = install.child.wait() => Some(GvisorInstallRace::Helm(status)),
-                        line = running_watch.stdout.next_line() => {
-                            match line {
-                                Ok(Some(line)) => match gvisor_event_watch_line(
+        let admission = futures_util::future::select_all(admission_baselines.into_iter().map(
+            |(namespace, baseline)| {
+                Box::pin(async move {
+                    observe_admission_rejection(common, &namespace, baseline, job).await
+                })
+            },
+        ));
+        tokio::pin!(admission);
+        loop {
+            tokio::select! {
+                line = async {
+                    match watch.as_mut() {
+                        Some(watch) => watch.stdout.next_line().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match line {
+                        Ok(Some(line)) => {
+                            let running_watch = watch.as_ref().expect("watch yielded a line");
+                            if let GvisorEventWatchLine::RuntimeClassRejected(rejection) =
+                                gvisor_event_watch_line(
                                     &line,
                                     namespace,
-                                    job,
-                                    &existing_event_uids,
-                                ) {
-                                    GvisorEventWatchLine::RuntimeClassRejected(rejection) => {
-                                        Some(GvisorInstallRace::RuntimeClassRejected(rejection))
-                                    }
-                                    GvisorEventWatchLine::Ignore => None,
-                                },
-                                Ok(None) | Err(_) => {
-                                    stop_gvisor_event_watch(running_watch).await;
-                                    Some(GvisorInstallRace::Helm(install.child.wait().await))
-                                }
+                                    job.expect("gVisor watch requires a rendered Job"),
+                                    &running_watch.existing_event_uids,
+                                )
+                            {
+                                break InstallRace::RuntimeClassRejected(rejection);
                             }
                         }
-                    };
-                    if let Some(outcome) = outcome {
-                        break outcome;
+                        Ok(None) | Err(_) => {
+                            if let Some(mut stopped) = watch.take() {
+                                stop_gvisor_event_watch(&mut stopped).await;
+                            }
+                        }
                     }
                 }
-            }
-            GvisorEventWatchStart::Unavailable => {
-                GvisorInstallRace::Helm(install.child.wait().await)
+                rejection = &mut admission => break InstallRace::AdmissionRejected(rejection.0),
+                status = install.child.wait() => break InstallRace::Helm(status),
             }
         }
     };
 
     match race {
-        GvisorInstallRace::Helm(status) => {
+        InstallRace::Helm(status) => {
             if let Some(watch) = watch.as_mut() {
                 stop_gvisor_event_watch(watch).await;
             }
@@ -3883,7 +4162,7 @@ async fn run_install_with_gvisor_observer(
             match captured {
                 Ok((ok, out, err)) => {
                     finish_captured_step(step, ok_detail, cmd, ok, out, err)?;
-                    Ok(GvisorInstallOutcome::Installed)
+                    Ok(InstallOutcome::Installed)
                 }
                 Err(error) => {
                     step.fail("failed");
@@ -3891,12 +4170,20 @@ async fn run_install_with_gvisor_observer(
                 }
             }
         }
-        GvisorInstallRace::RuntimeClassRejected(rejection) => {
+        InstallRace::RuntimeClassRejected(rejection) => {
             if let Some(watch) = watch.as_mut() {
                 stop_gvisor_event_watch(watch).await;
             }
             install.terminate().await;
-            Ok(GvisorInstallOutcome::RuntimeClassRejected { rejection, step })
+            Ok(InstallOutcome::RuntimeClassRejected { rejection, step })
+        }
+        InstallRace::AdmissionRejected(rejection) => {
+            if let Some(watch) = watch.as_mut() {
+                stop_gvisor_event_watch(watch).await;
+            }
+            install.terminate().await;
+            step.fail("admission rejected");
+            Ok(InstallOutcome::AdmissionRejected(rejection))
         }
     }
 }
@@ -4443,10 +4730,6 @@ async fn run_prepared_up(
         );
         return Ok(ClusterUpOutput::DryRun(crate::ui::DryRunPlan { lines }));
     }
-    let release_namespace_existed_before_install = ownership_candidates
-        .iter()
-        .find_map(|(namespace, existed)| (namespace == &opts.common.namespace).then_some(*existed))
-        .unwrap_or(false);
     require_on_path("helm")?;
     if detect_facts {
         for inference in reconcile_priority_class_ownership(&opts, &mut value_plan).await? {
@@ -4458,6 +4741,19 @@ async fn run_prepared_up(
     } else {
         preflight_priority_class_ownership(&opts, &value_plan).await?;
     }
+    let observe_controller = value_plan
+        .effective_values()
+        .get(CONTROLLER_DEPLOY_KEY)
+        .map(String::as_str)
+        != Some("false");
+    let admission_namespaces: Vec<_> = ownership_candidates
+        .iter()
+        .filter(|(namespace, _)| {
+            namespace == &opts.common.namespace
+                || (observe_controller && namespace == CONTROLLER_DEPLOYMENT_NAMESPACE)
+        })
+        .cloned()
+        .collect();
     cmds = up_commands_with_plan(&opts, &value_plan);
     let gvisor_preflight_job =
         rendered_gvisor_preflight_job(&opts.chart, &opts.common, &value_plan).await?;
@@ -4473,65 +4769,92 @@ async fn run_prepared_up(
         return Err(convergence::installation_failure(&opts.common, error, invocation).await);
     }
     for cmd in &cmds {
-        if let Some(job) = gvisor_preflight_job.as_deref() {
-            let outcome = match run_install_with_gvisor_observer(
-                &cl,
-                &label,
-                "installed",
-                cmd,
-                &opts.common.namespace,
-                job,
-                release_namespace_existed_before_install,
-            )
-            .await
-            {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return Err(
-                        convergence::installation_failure(&opts.common, error, invocation).await,
-                    )
-                }
-            };
-            match outcome {
-                GvisorInstallOutcome::Installed => {}
-                GvisorInstallOutcome::RuntimeClassRejected { rejection, step } if detect_facts => {
-                    if let Some(mode @ ("auto" | "require")) =
-                        final_operator_value(&opts, GVISOR_MODE_KEY)
-                    {
-                        step.fail("failed");
-                        let assignment = format!("{GVISOR_MODE_KEY}={mode}");
-                        let fix = format!(
+        let outcome = match run_install_with_observers(
+            &cl,
+            &label,
+            "installed",
+            cmd,
+            &opts.common,
+            gvisor_preflight_job.as_deref(),
+            &admission_namespaces,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Err(
+                    convergence::installation_failure(&opts.common, error, invocation).await,
+                )
+            }
+        };
+        match outcome {
+            InstallOutcome::Installed => {}
+            InstallOutcome::AdmissionRejected(rejection) => {
+                return Err(admission_install_error(rejection, invocation));
+            }
+            InstallOutcome::RuntimeClassRejected { rejection, step } if detect_facts => {
+                if let Some(mode @ ("auto" | "require")) =
+                    final_operator_value(&opts, GVISOR_MODE_KEY)
+                {
+                    step.fail("failed");
+                    let assignment = format!("{GVISOR_MODE_KEY}={mode}");
+                    let fix = format!(
                             "remove the explicit `{assignment}` setting and rerun to accept the inferred gVisor posture"
                         );
-                        return Err(crate::exit::CliError::usage(format!(
+                    return Err(crate::exit::CliError::usage(format!(
                             "explicit `{assignment}` contradicts the detected admission result `{rejection}`; {fix}"
                         ))
                         .with_fix(fix)
                         .into());
+                }
+                step.warn("retrying");
+                value_plan.set(GVISOR_MODE_KEY, "off");
+                ClusterUpInference::GvisorOff.render(ui);
+                if let Err(error) = discard_failed_gvisor_install_if_never_deployed(
+                    &cl,
+                    &opts.common,
+                    false,
+                    invocation,
+                )
+                .await
+                {
+                    return Err(
+                        convergence::installation_failure(&opts.common, error, invocation).await,
+                    );
+                }
+                let retry = up_commands_with_plan(&opts, &value_plan)
+                    .into_iter()
+                    .next()
+                    .expect("cluster up always has one Helm command");
+                let retry_namespace_states =
+                    futures_util::future::try_join_all(admission_namespaces.iter().map(
+                        |(namespace, _)| async move {
+                            Ok::<_, anyhow::Error>((
+                                namespace.clone(),
+                                namespace_exists(namespace).await?,
+                            ))
+                        },
+                    ))
+                    .await?;
+                match run_install_with_observers(
+                    &cl,
+                    &label,
+                    "installed",
+                    &retry,
+                    &opts.common,
+                    None,
+                    &retry_namespace_states,
+                )
+                .await
+                {
+                    Ok(InstallOutcome::Installed) => {}
+                    Ok(InstallOutcome::AdmissionRejected(rejection)) => {
+                        return Err(admission_install_error(rejection, invocation));
                     }
-                    step.warn("retrying");
-                    value_plan.set(GVISOR_MODE_KEY, "off");
-                    ClusterUpInference::GvisorOff.render(ui);
-                    if let Err(error) = discard_failed_gvisor_install_if_never_deployed(
-                        &cl,
-                        &opts.common,
-                        false,
-                        invocation,
-                    )
-                    .await
-                    {
-                        return Err(convergence::installation_failure(
-                            &opts.common,
-                            error,
-                            invocation,
-                        )
-                        .await);
+                    Ok(InstallOutcome::RuntimeClassRejected { .. }) => {
+                        unreachable!("gVisor observer is disabled after retry inference");
                     }
-                    let retry = up_commands_with_plan(&opts, &value_plan)
-                        .into_iter()
-                        .next()
-                        .expect("cluster up always has one Helm command");
-                    if let Err(error) = run_step(&cl, &label, "installed", &retry).await {
+                    Err(error) => {
                         return Err(convergence::installation_failure(
                             &opts.common,
                             error,
@@ -4540,25 +4863,22 @@ async fn run_prepared_up(
                         .await);
                     }
                 }
-                GvisorInstallOutcome::RuntimeClassRejected { rejection, step } => {
-                    step.fail("failed");
-                    let fix = invocation.gvisor_fix();
-                    let instruction = match invocation {
-                        UpInvocation::ClusterUp => format!("run `{fix}`"),
-                        UpInvocation::Apply => fix.to_string(),
-                    };
-                    return Err(crate::exit::CliError::failure(format!(
+            }
+            InstallOutcome::RuntimeClassRejected { rejection, step } => {
+                step.fail("failed");
+                let job = gvisor_preflight_job
+                    .as_deref()
+                    .expect("gVisor watch requires a rendered Job");
+                let fix = invocation.gvisor_fix();
+                let instruction = match invocation {
+                    UpInvocation::ClusterUp => format!("run `{fix}`"),
+                    UpInvocation::Apply => fix.to_string(),
+                };
+                return Err(crate::exit::CliError::failure(format!(
                         "gVisor preflight Job `{job}` could not create its pod: {rejection}. To install without gVisor isolation, {instruction}."
                     ))
                     .with_fix(fix)
                     .into());
-                }
-            }
-        } else {
-            if let Err(error) = run_step(&cl, &label, "installed", cmd).await {
-                return Err(
-                    convergence::installation_failure(&opts.common, error, invocation).await,
-                );
             }
         }
     }

@@ -369,10 +369,19 @@ if [ "$1" = "get" ] && { [ "$2" = "event" ] || [ "$2" = "events" ]; }; then
             printf '%s\n' 'Error from server (Forbidden): events is forbidden at the cluster scope' >&2
             exit 1
             ;;
-        *" -n target-namespace "*) ;;
+        *" -n target-namespace "*|*" -n agent-sandbox-system "*) ;;
         *)
-            printf 'event query was not scoped to target-namespace: %s\n' "$*" >&2
+            printf 'event query was not namespaced to the release or controller namespace: %s\n' "$*" >&2
             exit 64
+            ;;
+    esac
+    case " $* " in
+        *involvedObject.kind=Job*) ;;
+        *)
+            # The general cluster-up admission observer lists namespaced Events
+            # as JSON. Keep this independent from the gVisor preflight stream.
+            printf '%s\n' '{"apiVersion":"v1","kind":"EventList","items":[]}'
+            exit 0
             ;;
     esac
     watch="false"
@@ -738,8 +747,13 @@ exit 64
             invocations.contains(&format!("involvedObject.name={RENDERED_JOB}")),
             "the event selector must use the rendered fullname override:\n{invocations}"
         );
-        let watch_invocations: Vec<&str> = invocations
+        let gvisor_invocations: Vec<&str> = invocations
             .lines()
+            .filter(|line| line.contains(&format!("involvedObject.name={RENDERED_JOB}")))
+            .collect();
+        let watch_invocations: Vec<&str> = gvisor_invocations
+            .iter()
+            .copied()
             .filter(|line| line.contains("--watch"))
             .collect();
         assert_eq!(
@@ -756,8 +770,9 @@ exit 64
             "one list and watch stream must cover current and future Events:\n{invocations}"
         );
         if self.event_mode != "fresh-namespace" {
-            let snapshots: Vec<&str> = invocations
-                .lines()
+            let snapshots: Vec<&str> = gvisor_invocations
+                .iter()
+                .copied()
                 .filter(|line| !line.contains("--watch"))
                 .collect();
             assert_eq!(
@@ -773,6 +788,7 @@ exit 64
         assert!(
             invocations
                 .lines()
+                .filter(|line| line.contains(&format!("involvedObject.name={RENDERED_JOB}")))
                 .all(|line| line.contains("-n target-namespace")
                     && !line.contains("--all-namespaces")),
             "every event query must use namespaced permissions:\n{invocations}"
@@ -795,8 +811,9 @@ exit 64
         assert!(
             fs::read_to_string(&self.event_log)
                 .unwrap_or_default()
-                .is_empty(),
-            "a nonrendering gVisor preflight must not query Events"
+                .lines()
+                .all(|line| !line.contains("involvedObject.name=")),
+            "a nonrendering gVisor preflight must not query the gVisor preflight Event selector"
         );
         assert!(
             !self.watch_pid.exists(),
@@ -996,14 +1013,19 @@ fn fresh_namespace_rejection_is_observed_after_cli_creates_the_namespace() {
         "the CLI must create the namespace before Helm emits the event observed by the retry"
     );
     let invocations = fs::read_to_string(&fixture.event_log).unwrap_or_default();
+    let gvisor_invocations: Vec<&str> = invocations
+        .lines()
+        .filter(|line| line.contains(&format!("involvedObject.name={RENDERED_JOB}")))
+        .collect();
     assert_eq!(
-        invocations.lines().count(),
+        gvisor_invocations.len(),
         2,
-        "fresh namespace recovery must snapshot once and use one list-and-watch stream:\n{invocations}"
+        "fresh namespace recovery must snapshot once and use one gVisor list-and-watch stream:\n{invocations}"
     );
     assert!(
-        invocations
-            .lines()
+        gvisor_invocations
+            .iter()
+            .copied()
             .any(|line| !line.contains("--watch") && line.contains("{range .items[*]}{.metadata.uid}")),
         "the atomically created namespace must establish a stale Event UID boundary:\n{invocations}"
     );
@@ -1015,9 +1037,10 @@ fn fresh_namespace_rejection_is_observed_after_cli_creates_the_namespace() {
         "the stream must inspect current Events without an EventList resource version:\n{invocations}"
     );
     assert!(
-        invocations
-            .lines()
-            .all(|line| line.contains("-n target-namespace") && !line.contains("--all-namespaces")),
+        invocations.lines().all(|line| {
+            (line.contains("-n target-namespace") || line.contains("-n agent-sandbox-system"))
+                && !line.contains("--all-namespaces")
+        }),
         "fresh namespace retries must retain namespaced permissions:\n{invocations}"
     );
     fixture.assert_failed_revision_discarded_before_retry();
