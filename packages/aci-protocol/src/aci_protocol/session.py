@@ -420,11 +420,24 @@ class BootEnv(_AciModel):
     thinking: str | None = Field(
         default=None, json_schema_extra=_env("CURIE_THINKING", "worker")
     )
+    # The active deployment's environment (``prod`` or ``dev``, #3166). The
+    # runner's telemetry maps it onto the ``deployment.environment.name``
+    # resource attribute, which Langfuse stores as the trace ``environment``
+    # that environment-filtered metrics query on. Unset, traces land in the
+    # backend's default environment, as before.
+    deployment_environment: str | None = Field(
+        default=None, json_schema_extra=_env("CURIE_DEPLOYMENT_ENVIRONMENT", "worker")
+    )
     # Which env var(s) carry the model credential (#514): a bare name or a JSON
     # array of them, walked in order. Unset, the runner falls back to
     # CURIE_CREDENTIALS, which is today's behavior.
     model_env_key: str | None = Field(
         default=None, json_schema_extra=_env("CURIE_MODEL_ENV_KEY", "worker")
+    )
+    # The chart sets this on runner sandboxes for push metrics exporters.
+    metrics_temporality_preference: str | None = Field(
+        default=None,
+        json_schema_extra=_env("OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE", "substrate"),
     )
     # Operator-owned bounds, reachable through the chart's ``runner.extraEnv``
     # and docker ``-e``. No code producer emits them, and they hold no default
@@ -535,6 +548,7 @@ class BootEnv(_AciModel):
         base_url: str | None = None,
         api_backend: str | None = None,
         thinking: str | None = None,
+        deployment_environment: str | None = None,
         model_env_key: str | None = None,
         history_token: str | None = None,
         memory_token: str | None = None,
@@ -592,6 +606,8 @@ class BootEnv(_AciModel):
             env[cls.env_key("api_backend")] = api_backend
         if thinking:
             env[cls.env_key("thinking")] = thinking
+        if deployment_environment:
+            env[cls.env_key("deployment_environment")] = deployment_environment
         if model_env_key:
             env[cls.env_key("model_env_key")] = model_env_key
         if model:
@@ -674,8 +690,14 @@ class BootEnv(_AciModel):
             env[self.env_key("api_backend")] = self.api_backend
         if self.thinking is not None:
             env[self.env_key("thinking")] = self.thinking
+        if self.deployment_environment is not None:
+            env[self.env_key("deployment_environment")] = self.deployment_environment
         if self.model_env_key is not None:
             env[self.env_key("model_env_key")] = self.model_env_key
+        if self.metrics_temporality_preference is not None:
+            env[self.env_key("metrics_temporality_preference")] = (
+                self.metrics_temporality_preference
+            )
         if self.max_turns is not None:
             env[self.env_key("max_turns")] = str(self.max_turns)
         if self.history_max_turns is not None:
@@ -730,7 +752,11 @@ class BootEnv(_AciModel):
             # Empty is "not declared" here too: an unset or blank knob leaves the
             # runner sending no thinking configuration at all (ADR-0098).
             thinking=_str_or_none(env.get("CURIE_THINKING")),
+            deployment_environment=_str_or_none(env.get("CURIE_DEPLOYMENT_ENVIRONMENT")),
             model_env_key=_str_or_none(env.get("CURIE_MODEL_ENV_KEY")),
+            metrics_temporality_preference=_str_or_none(
+                env.get("OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE")
+            ),
             max_turns=_required_int(env.get("CURIE_MAX_TURNS")),
             history_max_turns=_tolerant_int(env.get("CURIE_HISTORY_MAX_TURNS")),
             history_max_bytes=_tolerant_int(env.get("CURIE_HISTORY_MAX_BYTES")),

@@ -349,6 +349,48 @@ struct ClusterAgentTarget {
     dry_run: bool,
 }
 
+#[derive(Subcommand, Debug)]
+enum LocalHooksAction {
+    /// Show an agent's hook partition and source binding maps.
+    Show {
+        #[command(flatten)]
+        target: AgentTarget<LocalTier>,
+    },
+    /// Replace one or both hook maps from a JSON file. An empty map clears it.
+    Configure {
+        #[command(flatten)]
+        target: AgentTarget<LocalTier>,
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+    },
+    /// Read the derived hook signing secret for an agent.
+    Secret {
+        #[command(flatten)]
+        target: AgentTarget<LocalTier>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ClusterHooksAction {
+    /// Show an agent's hook partition and source binding maps.
+    Show {
+        #[command(flatten)]
+        target: ClusterAgentTarget,
+    },
+    /// Replace one or both hook maps from a JSON file. An empty map clears it.
+    Configure {
+        #[command(flatten)]
+        target: ClusterAgentTarget,
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+    },
+    /// Read the derived hook signing secret for an agent.
+    Secret {
+        #[command(flatten)]
+        target: ClusterAgentTarget,
+    },
+}
+
 /// Stand up the connectors this version declares, and prune what it dropped.
 ///
 /// Split across the two components on purpose (ADR-0086): the API RENDERS the
@@ -999,7 +1041,11 @@ enum SreBotAction {
         #[arg(long, value_name = "USER_IDS", required = true)]
         approvers: Vec<String>,
         /// Install the upgrade path: the self-upgrade connector, the platform
-        /// upgrade Job, and the two identities behind them.
+        /// upgrade Job, and the two identities behind them. Applies
+        /// upgrade-role.yaml, platform-upgrade-role.yaml, and the rendered
+        /// platform-upgrade ConfigMap and suspended CronJob. Arms only
+        /// upgrade_platform: no self-upgrade CronJob is applied, so
+        /// upgrade_self stays unarmed.
         ///
         /// CREATES A NAMESPACE-ADMIN-EQUIVALENT IDENTITY for the Job that runs
         /// `helm upgrade`. Read examples/sre-bot/manifests/platform-upgrade-role.yaml
@@ -1997,6 +2043,11 @@ enum LocalAction {
     Versions {
         #[command(flatten)]
         target: AgentTarget<LocalTier>,
+    },
+    /// Manage an agent's hook configuration and signing secret.
+    Hooks {
+        #[command(subcommand)]
+        action: LocalHooksAction,
     },
     /// Show what an agent has learned (its memory log; `GET /agents/{id}/memory`).
     /// `--add <content>` seeds an operator-authored record; a fresh session is
@@ -3111,6 +3162,11 @@ enum ClusterAction {
         #[command(flatten)]
         target: ClusterAgentTarget,
     },
+    /// Manage an agent's hook configuration and signing secret.
+    Hooks {
+        #[command(subcommand)]
+        action: ClusterHooksAction,
+    },
     /// Show what an agent has learned (its memory log; `GET /agents/{id}/memory`).
     /// `--add <content>` seeds an operator-authored record; a fresh session is
     /// required before it is injected at boot.
@@ -3194,8 +3250,16 @@ impl ClusterTargetSources {
         let Some(("cluster", cluster_matches)) = matches.subcommand() else {
             return Self::default();
         };
-        let Some((_, action_matches)) = cluster_matches.subcommand() else {
+        let Some((action_name, action_matches)) = cluster_matches.subcommand() else {
             return Self::default();
+        };
+        let action_matches = if action_name == "hooks" {
+            let Some((_, hook_matches)) = action_matches.subcommand() else {
+                return Self::default();
+            };
+            hook_matches
+        } else {
+            action_matches
         };
         Self {
             namespace_supplied: matches!(
@@ -3270,6 +3334,17 @@ fn cluster_action_target(action: &ClusterAction) -> (Option<&str>, Option<&str>)
             Some(target.conn.namespace.as_str()),
             Some(target.conn.release.as_str()),
         ),
+        ClusterAction::Hooks { action } => {
+            let target = match action {
+                ClusterHooksAction::Show { target }
+                | ClusterHooksAction::Configure { target, .. }
+                | ClusterHooksAction::Secret { target } => target,
+            };
+            (
+                Some(target.conn.namespace.as_str()),
+                Some(target.conn.release.as_str()),
+            )
+        }
     }
 }
 
@@ -3366,6 +3441,15 @@ fn retarget_cluster_action(
         ClusterAction::Versions { target }
         | ClusterAction::Memory { target, .. }
         | ClusterAction::Approvals { target, .. } => {
+            replace(&mut target.conn.namespace, &namespace);
+            replace(&mut target.conn.release, &release);
+        }
+        ClusterAction::Hooks { action } => {
+            let target = match action {
+                ClusterHooksAction::Show { target }
+                | ClusterHooksAction::Configure { target, .. }
+                | ClusterHooksAction::Secret { target } => target,
+            };
             replace(&mut target.conn.namespace, &namespace);
             replace(&mut target.conn.release, &release);
         }
@@ -3571,9 +3655,9 @@ async fn bind_cluster_connector_secrets(
     agent_name: &str,
     secrets: std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
-    if secrets.is_empty() {
-        return Ok(());
-    }
+    // An empty map is not a no-op: a redeploy that drops every connector
+    // secret must clear the agent's stale binding (#3021).
+    //
     // #3082: a bundle deploy whose connector secrets already match the
     // release must not helm-upgrade the platform, so the chart is resolved
     // only when the bind actually changes something.
@@ -4466,6 +4550,17 @@ async fn run(command: Option<Command>) -> Result<()> {
                 emit(local::with_deploy_unreachable_hint(result, &local_api_url).await?)
             }
             LocalAction::Versions { target } => emit(commands::versions(target.into()).await?),
+            LocalAction::Hooks { action } => match action {
+                LocalHooksAction::Show { target } => {
+                    emit(commands::hooks_show(target.into()).await?)
+                }
+                LocalHooksAction::Configure { target, file } => {
+                    emit(commands::hooks_configure(target.into(), &file).await?)
+                }
+                LocalHooksAction::Secret { target } => {
+                    emit(commands::hooks_secret(target.into()).await?)
+                }
+            },
             LocalAction::WorkItems {
                 id,
                 agent,
@@ -5879,6 +5974,37 @@ async fn run(command: Option<Command>) -> Result<()> {
                     .await?,
                 )
             }
+            ClusterAction::Hooks { action } => {
+                let (target, file, verb) = match action {
+                    ClusterHooksAction::Show { target } => (target, None, "show"),
+                    ClusterHooksAction::Configure { target, file } => {
+                        (target, Some(file), "configure")
+                    }
+                    ClusterHooksAction::Secret { target } => (target, None, "secret"),
+                };
+                let ClusterAgentTarget {
+                    agent,
+                    conn,
+                    dry_run,
+                } = target;
+                let (api_url, api_key, _cluster_api_pf) =
+                    resolve_cluster_conn(conn, dry_run).await?;
+                let opts = AgentActionOpts {
+                    api_url,
+                    api_key,
+                    agent,
+                    dry_run,
+                };
+                match verb {
+                    "show" => emit(commands::hooks_show(opts).await?),
+                    "configure" => emit(commands::hooks_configure(
+                        opts,
+                        &file.expect("configure supplies a file"),
+                    ).await?),
+                    "secret" => emit(commands::hooks_secret(opts).await?),
+                    _ => unreachable!(),
+                }
+            }
             ClusterAction::Memory { target, add } => {
                 let ClusterAgentTarget {
                     agent,
@@ -6106,14 +6232,15 @@ async fn run(command: Option<Command>) -> Result<()> {
                     ));
                 }
             }
-            if let Some(target) =
-                curie::kube_context::pin_for_cluster_command(curie::installation::resolve_context(
+            let selected_context = curie::kube_context::pin_for_cluster_command(
+                curie::installation::resolve_context(
                     context.as_deref(),
                     declared
                         .as_ref()
                         .and_then(|cfg| cfg.install.context.as_deref()),
-                ))?
-            {
+                ),
+            )?;
+            if let Some(target) = &selected_context {
                 ui::ui().note(&format!(
                     "Kubernetes context: {} (cluster {})",
                     target.context, target.cluster
@@ -6136,11 +6263,24 @@ async fn run(command: Option<Command>) -> Result<()> {
             // Discover independently. `zip` required both flags, so a bare
             // `curie doctor` never reached the platform API (#1367). Errors
             // are discarded inside `doctor`: gather is failure-tolerant.
+            let matching_file = declared.as_ref().filter(|config| {
+                config.install.namespace == target.namespace
+                    && config.install.release == target.release
+            });
+            let apply_context = matching_file.and_then(|config| {
+                selected_context.as_ref().and_then(|selected| {
+                    (curie::installation::resolve_context(None, config.install.context.as_deref())
+                        != Some(selected.context.as_str()))
+                    .then_some(selected.context.as_str())
+                })
+            });
             let out = curie::doctor::doctor(
                 &target.namespace,
                 &target.release,
                 api_url.as_deref(),
                 api_key.as_deref(),
+                matching_file.is_some(),
+                apply_context,
             )
             .await;
             if out.release_not_serving() {

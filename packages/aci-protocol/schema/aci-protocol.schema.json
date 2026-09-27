@@ -400,6 +400,22 @@
           ],
           "title": "Connector Secret Keys"
         },
+        "deployment_environment": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "env": "CURIE_DEPLOYMENT_ENVIRONMENT",
+          "producer": [
+            "worker"
+          ],
+          "title": "Deployment Environment"
+        },
         "fake_model": {
           "anyOf": [
             {
@@ -512,6 +528,22 @@
             "worker"
           ],
           "title": "Memory Token"
+        },
+        "metrics_temporality_preference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "env": "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE",
+          "producer": [
+            "substrate"
+          ],
+          "title": "Metrics Temporality Preference"
         },
         "model": {
           "anyOf": [
@@ -1643,6 +1675,6 @@
   },
   "$id": "https://curietech.ai/schemas/aci-protocol.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocolVersion": "0.5.2",
-  "title": "ACI Protocol v0.5.2"
+  "protocolVersion": "0.5.4",
+  "title": "ACI Protocol v0.5.4"
 }

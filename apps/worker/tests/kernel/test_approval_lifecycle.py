@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -35,7 +36,7 @@ from curie_worker.approvals import (
 from curie_worker.behaviorpacks import BehaviorPacks
 from curie_worker.binding import GRANT_TOOL_ENV
 from curie_worker.kernel import _WorkspaceInferenceCarry
-from curie_worker.reply_sink import TargetRoute
+from curie_worker.reply_sink import TargetRoute, _ClusterMessageReplyAdapter
 from curie_worker.runner_client import RunnerError
 from curie_worker.sandbox.types import RouteState
 from curie_worker.workspace import WorkspaceSelectionRefused
@@ -2111,6 +2112,25 @@ def test_the_created_record_carries_the_turns_kind_and_adapter(make_harness) -> 
             # producer that replaced the block rather than extending it fails.
             assert req.reply_channel == "C1"
             assert req.reply_placeholder == "p-1"
+
+    asyncio.run(go())
+
+
+def test_session_approval_carries_a_finite_deadline(make_harness) -> None:
+    """A session approval the worker creates has a finite SLA so the existing
+    sweeper can wake a turn nobody resolves.
+    """
+
+    async def go() -> None:
+        approvals = RecordingApprovals()
+        async with make_harness(approvals=approvals) as h:
+            h.runner.default_script = _awaiting_script("Give ACME a 20% discount")
+            await h.kernel.process_event(_qevent("discount?", event_id="ev-appr-deadline"))
+
+            assert len(approvals.requests) == 1
+            req = approvals.requests[0]
+            assert req.expires_in_seconds is not None
+            assert req.expires_in_seconds == 24 * 60 * 60
 
     asyncio.run(go())
 
@@ -4640,5 +4660,78 @@ def test_genuine_repository_message_on_workspaceless_install_is_still_refused(
             assert probe.requested == ["acme-corp/acme-bot"]
             assert h.runner.opened == []
             assert h.sink.last_text == _ALLOWLIST_REFUSAL
+
+    asyncio.run(go())
+
+
+_CLUSTER_MESSAGE_REF = "123e4567-e89b-42d3-a456-426614174883"
+
+
+@pytest.mark.parametrize(
+    ("adapter", "placeholder", "expected_ref"),
+    [
+        # #2883: the relay addresses the caller's session bucket by the turn's
+        # ref, so a tool-approval card must carry it or the adapter refuses it.
+        ("curie-cluster-message", _CLUSTER_MESSAGE_REF, _CLUSTER_MESSAGE_REF),
+        # Every other transport posts a fresh card message: no ref, or the
+        # post would be read as an edit of the turn's own reply.
+        (None, "p-1", None),
+    ],
+)
+def test_tool_approval_card_reaches_the_cluster_message_caller(
+    make_harness,
+    caplog: pytest.LogCaptureFixture,
+    adapter: str | None,
+    placeholder: str,
+    expected_ref: str | None,
+) -> None:
+    """#2883: a non-publication approval raised by a ``cluster message`` turn
+    delivers its card into the caller's relay bucket, like #2757 did for
+    publication cards, instead of failing with ``reply_ref is required``."""
+
+    async def go() -> None:
+        approvals = RecordingApprovals()
+        async with make_harness(approvals=approvals) as h:
+            h.runner.default_script = _awaiting_script(
+                "mcp__kubernetes__resources_scale apps/v1 Deployment"
+            )
+            with caplog.at_level(logging.WARNING, logger="curie_worker.kernel"):
+                await h.kernel.process_event(
+                    _qevent(
+                        "scale it down",
+                        thread="th-2883",
+                        placeholder=placeholder,
+                        adapter=adapter,
+                    )
+                )
+
+            assert approvals.create_calls == 1
+            cards = [
+                (event, route)
+                for event, route, _ in h.sink.events
+                if isinstance(event, ReplyPost)
+                and isinstance(event.message.interaction, ConfirmIntent)
+            ]
+            assert len(cards) == 1
+            card, route = cards[0]
+            assert card.target.reply_ref == expected_ref
+            assert route.adapter == adapter
+            assert card.message.interaction.id == "appr-1"
+            assert "approval card post failed" not in caplog.text
+            if expected_ref is not None:
+                # The real relay adapter addresses this card to the caller's
+                # bucket instead of refusing it (the #2883 log line).
+                relay = _ClusterMessageReplyAdapter(
+                    "http://api.example.test:8000", "worker-token"
+                )
+                endpoint, ref = relay._endpoint_for(card.target.reply_ref)
+                assert ref == expected_ref
+                assert endpoint.endswith(f"/cluster-message-replies/{expected_ref}")
+                # The CLI waiter prints reply.update text, so the caller also
+                # sees the awaiting-approval notice in that same bucket.
+                assert any(
+                    ref == expected_ref and "Awaiting approval (appr-1)" in text
+                    for _, ref, text in h.sink.updates
+                )
 
     asyncio.run(go())
