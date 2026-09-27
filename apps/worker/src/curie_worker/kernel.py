@@ -129,7 +129,7 @@ from .config import WorkerConfig
 from .delivery_lease import DeliveryLease, LeaseLostError
 from .hook_runs import HookRunOutcome, HookRunRecorder, HookRunRecorderError
 from .killswitch import KillSwitch
-from .markers import CompletionRecord, MalformedCompletionError, Markers
+from .markers import CompletionRecord, DoneMarkerValue, MalformedCompletionError, Markers
 from .publication_validation import validate_snapshot_against_base
 from .receipt import render_receipt
 from .reply_sink import (
@@ -2116,7 +2116,7 @@ class Kernel:
                     adopted = await self._adopt_resumed_work_item(event_id, thread_key)
                 except _FactoryExecutionEnded:
                     self._factory_work_item_events.add(event_id)
-                    await self._markers.mark_done(event_id)
+                    await self._markers.mark_done(event_id, marker_value="1")
                     return
                 if adopted != parsed_work_item.request_id:
                     if adopted is not None:
@@ -2126,7 +2126,7 @@ class Kernel:
                         event_id,
                         adopted,
                     )
-                    await self._markers.mark_done(event_id)
+                    await self._markers.mark_done(event_id, marker_value="1")
                     return
                 owned_work_item_id = adopted
             elif self._is_approval_resume(event_id):
@@ -2136,7 +2136,7 @@ class Kernel:
                     )
                 except _FactoryExecutionEnded:
                     self._factory_work_item_events.add(event_id)
-                    await self._markers.mark_done(event_id)
+                    await self._markers.mark_done(event_id, marker_value="1")
                     return
             _OWNED_WORK_ITEM.set(owned_work_item_id)
 
@@ -3581,6 +3581,15 @@ class Kernel:
         if _is_targetless(qevent):
             await self._settle_targetless(qevent, outcome, telemetry_outcome, lease)
             return
+        history_capacity_review = (
+            outcome == "escalated"
+            and turn is not None
+            and turn.review_origin_key == event_id
+            and turn.classification == "history-persistence-error"
+        )
+        marker_value: DoneMarkerValue = (
+            "history_capacity" if history_capacity_review else "1"
+        )
         record = CompletionRecord(
             event_id=event_id,
             event=TurnCompleted(
@@ -3608,6 +3617,7 @@ class Kernel:
                 entry_id=lease.entry_id,
                 owner=lease.owner,
                 generation=lease.generation,
+                marker_value=marker_value,
             )
             if fenced is None:
                 # The single most diagnostic line in this feature: it is the
@@ -3634,7 +3644,7 @@ class Kernel:
             generation = fenced
         else:
             generation = await self._markers.mark_completion_pending(event_id, record)
-            await self._markers.mark_done(event_id)
+            await self._markers.mark_done(event_id, marker_value=marker_value)
         _LIFECYCLE_OUTCOME.set(telemetry_outcome)
         await self._deliver_completion(record, generation=generation)
         attributes = {

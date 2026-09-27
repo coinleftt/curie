@@ -1162,6 +1162,9 @@ class GitHubReviewFeedback(Base):
         CheckConstraint(
             "enqueue_attempts >= 0", name="github_review_feedback_attempts_ck"
         ),
+        CheckConstraint(
+            "notice_scan_page >= 1", name="github_review_feedback_notice_scan_page_ck"
+        ),
         Index("ix_github_review_feedback_pending", "status", "created_at"),
     )
 
@@ -1199,6 +1202,8 @@ class GitHubReviewFeedback(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     queued_at: Mapped[datetime | None] = mapped_column(default=None)
     terminal_scan_cursor: Mapped[str | None] = mapped_column(default=None)
+    notice_marker: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), default=None)
+    notice_scan_page: Mapped[int] = mapped_column(default=1, server_default="1")
 
 
 class Publication(Base):
