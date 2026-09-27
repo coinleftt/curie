@@ -96,7 +96,8 @@ files**, each absent from a bundle that needs none, all three invisible to Claud
   stages the same name into the runner env and `local deploy` resolves it onto the agent record
   with no `--secret`, so the `unhosted_url` fallback derives the same header (#2518). A hosted
   connector with several
-  secrets and no `bearer_secret` is `connectors.bearer_secret_required`. Validated by `packages/plugin-format/src/plugin_format/validate.py::_validate_connectors`,
+  secrets, any of them a plain string, and no `bearer_secret` is `connectors.bearer_secret_required`;
+  one whose secrets are all `SecretRef`s is valid and derives no header (#3057). Validated by `packages/plugin-format/src/plugin_format/validate.py::_validate_connectors`,
   which emits `connectors.*` codes (`connectors.not_object`, `connectors.ambiguous`,
   `connectors.underspecified`, `connectors.reserved_name`, `connectors.duplicate_connector`,
   `connectors.duplicate_server`, `connectors.build_context_escapes`,
