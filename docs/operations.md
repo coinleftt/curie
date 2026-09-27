@@ -1244,9 +1244,13 @@ stays `running`. Path A runs `helm upgrade --reuse-values --timeout 60s`, which
 the client cancels while the drain gate waits; the marker must stay
 `quiescing` on a lease no longer than one drain lease, `curie doctor` must
 report `marker expires in`, and a second labelled issue must stay `waiting`
-with the paused-for-upgrade status comment. Deleting the drain Job and
-force-deleting its pod must clear the marker within one lease plus slack, and
-the queued request must then leave `waiting`. Path B deletes the drain Job
+with the paused-for-upgrade status comment. The driver then SIGKILLs the drain
+process through the node's container runtime, so no SIGTERM handler can clear
+the marker, and deletes the Job. The marker must read `claims_enabled` within
+one lease plus slack, and a worker must claim the queued request. The kill needs
+ssh with passwordless sudo and `crictl` on the drain pod's node (the node name,
+or `CURIE_FACTORY_NODE_SSH_HOST`); without it the run fails rather than passing
+on SIGTERM cleanup. Path B deletes the drain Job
 while a 20 minute upgrade still waits; the marker must clear within 10 s and
 the drain pod log must say the gate was terminated. The evidence judges
 `seed_status_before`, `baseline_state`, the `path_a_*` helm exit, elapsed,
