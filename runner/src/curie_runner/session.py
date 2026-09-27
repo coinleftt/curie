@@ -74,6 +74,7 @@ from .otel import RunTracer, _GenerationSpan
 from .progress import ProgressActivity
 from .side_effects import SideEffectClassifier
 from .translate import TurnState, translate_message
+from .usage_report import UsageSink
 
 logger = logging.getLogger(__name__)
 
@@ -254,8 +255,14 @@ class SessionRunner:
         connector_availability: ConnectorAvailability | None = None,
         history_capacity_exceeded: bool = False,
         progress_activity: ProgressActivity | None = None,
+        usage_reporter: UsageSink | None = None,
+        primary_model: str | None = None,
     ) -> None:
         self._factory = session_factory
+        # Per-model token usage reported at the ResultMessage boundary (#3223);
+        # None when no progress URL and token were injected.
+        self._usage_reporter = usage_reporter
+        self._primary_model = primary_model
         # Session-wide activity counters for report_progress (#3077); None when
         # no progress tool is mounted.
         self._progress_activity = progress_activity
@@ -1098,6 +1105,11 @@ class SessionRunner:
             # publication call and classifying the turn that made it.
             await self._observe_publication_calls(state)
             decided_result_final: Final | None = None
+            if isinstance(message, AssistantMessage):
+                if self._primary_model is None:
+                    self._primary_model = getattr(message, "model", None) or None
+                if self._usage_reporter is not None:
+                    self._usage_reporter.observe(message)
             if isinstance(message, ResultMessage):
                 terminal_reason = getattr(message, "terminal_reason", None)
                 cancelled = self._interrupt_requested and not self._timeout_requested
@@ -1116,6 +1128,9 @@ class SessionRunner:
                             self._reclassify(sdk_final), state
                         )
                 gen.record_result_usage(getattr(message, "usage", None))
+                if self._usage_reporter is not None:
+                    # Awaited before the Final event is yielded; never raises.
+                    await self._usage_reporter.report(message, self._primary_model)
                 gen.result_boundary_observed(
                     failed=result_failed,
                     terminal_reason=terminal_reason,
