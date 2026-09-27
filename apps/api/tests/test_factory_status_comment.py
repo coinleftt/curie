@@ -626,7 +626,7 @@ def test_queued_review_revision_replies_that_it_waits_for_the_current_run(
         "INSERT INTO curie.execution_requests "
         "(id, work_item_id, sequence, status, wait_deadline, objective, requester, reply_kind, "
         "reply_address, reply_conversation_id) VALUES "
-        "(:id, :work_item, 3, 'queued', clock_timestamp() + interval '30 seconds', :objective, "
+        "(:id, :work_item, 3, 'queued', NULL, :objective, "
         "'github:6601:octocat', 'github', :repo, :conversation)",
         {
             "id": queued,
