@@ -624,6 +624,63 @@ def test_review_mention_during_live_run_waits_then_becomes_next_request(
     assert rows[1]["id"] == revision["id"]
 
 
+def test_distinct_review_mentions_wait_in_order_until_each_live_run_ends(
+    factory: tuple[TestClient, ReviewGitHubAPI], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, api = factory
+    number, first = _admit_issue(client, api)
+    pr = next(_PULLS)
+    api.open_pull(pr)
+    _own_pull_request(first["work_item_id"], pr)
+    _mark_running(first["id"])
+    first_payload, first_fid = _feedback_event(
+        api, "issue_comment", pr, f"@{MENTION} please change the first helper"
+    )
+    second_payload, second_fid = _feedback_event(
+        api, "issue_comment", pr, f"@{MENTION} please change the second helper"
+    )
+
+    first_reply = _post(client, "issue_comment", first_payload)
+    second_reply = _post(client, "issue_comment", second_payload)
+
+    assert first_reply.json()["status"] == "factory_queued", first_reply.text
+    assert second_reply.json()["status"] == "factory_queued", second_reply.text
+    rows = _requests(number)
+    assert [row["sequence"] for row in rows] == [1, 2, 3]
+    assert [row["status"] for row in rows] == ["running", "queued", "queued"]
+    assert [row["work_item_id"] for row in rows] == [first["work_item_id"]] * 3
+    assert rows[1]["objective"].splitlines()[0].endswith(f"#issuecomment-{first_fid}")
+    assert rows[2]["objective"].splitlines()[0].endswith(f"#issuecomment-{second_fid}")
+    first_revision_id, second_revision_id = rows[1]["id"], rows[2]["id"]
+
+    _execute(
+        "UPDATE curie.execution_requests SET status = 'completed', "
+        "terminal_at = clock_timestamp(), terminal_cause = 'completed', "
+        "version = version + 1 WHERE id = :id AND status = 'running'",
+        {"id": first["id"]},
+    )
+    _reconcile_queued_revisions(monkeypatch)
+    rows = _requests(number)
+    assert [row["status"] for row in rows] == ["completed", "waiting", "queued"]
+    assert [row["id"] for row in rows[1:]] == [first_revision_id, second_revision_id]
+
+    _mark_running(first_revision_id)
+    _reconcile_queued_revisions(monkeypatch)
+    assert [row["status"] for row in _requests(number)] == [
+        "completed", "running", "queued"
+    ]
+    _execute(
+        "UPDATE curie.execution_requests SET status = 'completed', "
+        "terminal_at = clock_timestamp(), terminal_cause = 'completed', "
+        "version = version + 1 WHERE id = :id AND status = 'running'",
+        {"id": first_revision_id},
+    )
+    _reconcile_queued_revisions(monkeypatch)
+    rows = _requests(number)
+    assert [row["status"] for row in rows] == ["completed", "completed", "waiting"]
+    assert rows[2]["id"] == second_revision_id
+
+
 @pytest.fixture
 def review_key() -> str:
     from cryptography.hazmat.primitives import serialization
