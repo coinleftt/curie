@@ -885,6 +885,7 @@ def test_workflow_consumes_each_selection_output_exactly() -> None:
         "skill_local_tiers": "${{ steps.filter.outputs.skill_local_tiers }}",
         "images": "${{ steps.filter.outputs.images }}",
         "cli_release": "${{ steps.filter.outputs.cli_release }}",
+        "runtime_assertions": "${{ steps.runtime.outputs.runtime_assertions }}",
     }
 
     skill_local = jobs["e2e-ladder"]
@@ -1669,3 +1670,21 @@ def test_selector_directory_has_no_stdlib_shadowing_modules() -> None:
             "the script on platforms where it's a dynamic extension instead "
             "(e.g. macOS's `select`), per issue #1878."
         )
+
+
+def test_omit_kind_keeps_cluster_for_a_changed_runtime_assertion(tmp_path: Path) -> None:
+    # #3391: E2E required refuses a changed runtime assertion without a pass
+    # receipt from the cluster rung, so omitting kind must not drop that rung.
+    runtime = "charts/curie/ci/runtime/connector-readiness-runtime.sh"
+    outputs = _selector_outputs_omit_kind(tmp_path, runtime)
+    assert outputs["cluster"] == "true"
+    assert outputs["released_upgrade"] == "false"
+    # Negative control: a sibling chart CI file is still dropped.
+    other = _selector_outputs_omit_kind(tmp_path, "charts/curie/ci/runtime/README.md")
+    assert other["cluster"] == "false"
+
+
+def _selector_outputs_omit_kind(tmp_path: Path, path: str) -> dict[str, str]:
+    completed, output = _invoke_selector(tmp_path, path, omit_kind=True)
+    assert completed.returncode == 0, completed.stderr
+    return dict(line.split("=", maxsplit=1) for line in output.splitlines())
