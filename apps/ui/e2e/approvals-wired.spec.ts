@@ -106,9 +106,11 @@ test("resolves with the same-origin console cookie and exactly decision/note, ne
 
   await page.context().addCookies([
     {
-      name: "curie_console_session",
+      name: "__Host-curie_console_session",
       value: "session-example",
       url: String(testInfo.project.use.baseURL),
+      secure: true,
+      path: "/",
     },
   ]);
 
@@ -131,7 +133,7 @@ test("resolves with the same-origin console cookie and exactly decision/note, ne
 
   await expect.poll(() => resolveBody).toEqual({ decision: "approved", note: "Confirmed in console" });
   await expect.poll(() => resolveHeaders).not.toBeNull();
-  expect(resolveHeaders?.cookie).toContain("curie_console_session=session-example");
+  expect(resolveHeaders?.cookie).toContain("__Host-curie_console_session=session-example");
   expect(resolveHeaders?.["x-api-key"]).toBeUndefined();
 });
 
