@@ -30,6 +30,9 @@ detail, and documentation drift on one version-selectable system diagram.
 ## Table of contents
 
 - [Clause status](#clause-status)
+  - [Local to production parity](#local-to-production-parity)
+  - [Git flow deploy](#git-flow-deploy)
+  - [Eval gate](#eval-gate)
 - [Overview](#overview)
 - [Component map](#component-map)
   - [Adopted, not built](#adopted-not-built)

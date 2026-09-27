@@ -22,6 +22,18 @@ Run `curie try` for a first reply without configured credentials or prompts. Run
 
 Join the [Curie Discord community](https://discord.gg/YZASub2d5B) to connect with other builders.
 
+## Table of contents
+
+- [Why your agent breaks when it leaves your laptop](#why-your-agent-breaks-when-it-leaves-your-laptop)
+- [Quickstart](#quickstart)
+  - [Prerequisites](#prerequisites)
+  - [Building and deploying your first agent with Curie](#building-and-deploying-your-first-agent-with-curie)
+- [Which target do I want?](#which-target-do-i-want)
+- [Status](#status)
+- [Contributing to Curie](#contributing-to-curie)
+- [License and trademarks](#license-and-trademarks)
+- [Where do I go next?](#where-do-i-go-next)
+
 ## Why your agent breaks when it leaves your laptop
 
 Local and production environments are usually different - a different Python version, a missing tool,
