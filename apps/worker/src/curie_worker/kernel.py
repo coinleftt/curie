@@ -586,7 +586,8 @@ def _join_reply_blocks(*parts: str | None) -> str:
 _CLASSIFICATION_GUIDANCE = {
     "history-persistence-error": (
         "Conversation history capacity exceeded. Work already performed may have side "
-        "effects; inspect the result. The run can be retried."
+        "effects; inspect the result. The run can be retried; if one turn is over the "
+        "cap, raise api.transcriptMaxThreadBytes (TRANSCRIPT_MAX_THREAD_BYTES)."
     ),
     "max-turns": (
         "The run used its whole turn budget; raise worker.workItemMaxTurns "
