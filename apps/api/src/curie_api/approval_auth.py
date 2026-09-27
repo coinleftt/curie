@@ -13,8 +13,9 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
-from fastapi import Cookie, Depends, Header, HTTPException, status
+from fastapi import Cookie, Depends, Header, HTTPException, Request, Response, status
 
 from . import adapter_principal, approval_principal, crud
 from .auth import require_api_key
@@ -24,9 +25,29 @@ from .deps import SessionDep
 APPROVAL_PRINCIPAL_HEADER = "X-Curie-Approval-Principal"
 ADAPTER_PRINCIPAL_HEADER = "X-Curie-Adapter-Principal"
 APPROVAL_ACTOR_HEADER = "X-Curie-Approval-Actor"
-CONSOLE_SESSION_COOKIE = "curie_console_session"
+CONSOLE_SESSION_COOKIE = "__Host-curie_console_session"
+_SAFE_ORIGIN_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_DEFAULT_ORIGIN_PORTS = {"http": 80, "https": 443}
 
 AuthenticatedPrincipalKind = Literal["chat", "console", "operator", "adapter"]
+
+
+def set_console_session_cookie(response: Response, token: str) -> None:
+    """Set the host-only console session cookie.
+
+    ``SameSite=Strict`` stays. It does not stop a same-site cross-origin form,
+    which is why the cookie-only origin check in ``require_approval_principal``
+    exists.
+    """
+
+    response.set_cookie(
+        CONSOLE_SESSION_COOKIE,
+        token,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
+    )
 
 
 @dataclass(frozen=True)
@@ -72,8 +93,74 @@ async def authenticate_console_session(
     )
 
 
+def _origin_key(scheme: str, host: str, port: int | None) -> tuple[str, str, int | None] | None:
+    normalized_scheme = scheme.strip().lower()
+    normalized_host = host.strip().lower()
+    if not normalized_scheme or not normalized_host:
+        return None
+    if port == _DEFAULT_ORIGIN_PORTS.get(normalized_scheme):
+        port = None
+    return (normalized_scheme, normalized_host, port)
+
+
+def _origin_from_absolute(value: str) -> tuple[str, str, int | None] | None:
+    raw = value.strip()
+    if not raw or raw == "null":
+        return None
+    try:
+        parts = urlsplit(raw)
+        port = parts.port
+    except ValueError:
+        return None
+    if not parts.scheme or parts.hostname is None or parts.hostname == "":
+        return None
+    return _origin_key(parts.scheme, parts.hostname, port)
+
+
+def _expected_console_origin(request: Request) -> tuple[str, str, int | None] | None:
+    forwarded_host = request.headers.get("x-forwarded-host")
+    if forwarded_host is not None:
+        host = forwarded_host.split(",", 1)[0].strip()
+        forwarded_proto = request.headers.get("x-forwarded-proto")
+        if forwarded_proto is not None and forwarded_proto.split(",", 1)[0].strip():
+            scheme = forwarded_proto.split(",", 1)[0].strip()
+        else:
+            scheme = request.url.scheme
+        return _origin_from_absolute(f"{scheme}://{host}")
+    try:
+        port = request.url.port
+    except ValueError:
+        return None
+    if not request.url.scheme or request.url.hostname is None:
+        return None
+    return _origin_key(request.url.scheme, request.url.hostname, port)
+
+
+def _claimed_console_origin(request: Request) -> tuple[str, str, int | None] | None:
+    """Origin wins over Referer. A present Origin is never replaced by Referer."""
+
+    if "origin" in request.headers:
+        raw = request.headers["origin"].strip()
+    elif "referer" in request.headers:
+        raw = request.headers["referer"].strip()
+    else:
+        return None
+    if not raw or raw == "null":
+        return None
+    return _origin_from_absolute(raw)
+
+
+def _console_origin_rejected() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="console session origin rejected",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 async def require_approval_principal(
     approval_id: uuid.UUID,
+    request: Request,
     session: SessionDep,
     x_curie_approval_principal: Annotated[
         str | None, Header(alias=APPROVAL_PRINCIPAL_HEADER)
@@ -90,6 +177,10 @@ async def require_approval_principal(
     issuance but is not itself a human identity.  Any two of a principal
     header, a console cookie and an adapter credential together are ambiguous
     and fail closed rather than choosing one by precedence.
+
+    When the console cookie is the only credential on an unsafe method, the
+    browser origin must match this request before the session is looked up.
+    Header principals are not origin checked.
     """
 
     has_token = x_curie_approval_principal is not None
@@ -100,6 +191,11 @@ async def require_approval_principal(
         raise _unauthorized("ambiguous approval principal credentials")
     if presented == 0:
         raise _unauthorized()
+
+    if has_cookie and request.method.upper() not in _SAFE_ORIGIN_METHODS:
+        claimed = _claimed_console_origin(request)
+        if claimed is None or claimed != _expected_console_origin(request):
+            raise _console_origin_rejected()
 
     if has_adapter:
         assert x_curie_adapter_principal is not None
