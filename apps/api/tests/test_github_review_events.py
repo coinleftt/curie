@@ -3059,6 +3059,69 @@ def test_capacity_notice_scan_persists_page_after_five_full_pages(review_stack) 
     assert len(truth.comment_posts) == 1
 
 
+def test_concurrent_capacity_observers_preserve_notified_marker_and_one_comment(
+    review_stack,
+) -> None:
+    from curie_api.github_review_store import GitHubReviewReconciler
+
+    client, truth, valkey, stream = review_stack
+    _admit_queued_review(client, truth, valkey, stream)
+    _write_review_history_capacity_terminal(client, valkey, truth.feedback.event_id, stream)
+    reconciler = client.app.state.github_review_reconciler
+
+    async def competing() -> None:
+        posting = asyncio.Event()
+        release = asyncio.Event()
+
+        async def github(request: httpx.Request) -> httpx.Response:
+            if (
+                request.method == "POST"
+                and request.url.path == f"/repos/{REPO}/issues/17/comments"
+            ):
+                posting.set()
+                await release.wait()
+            return truth.handle(request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(github)) as external:
+            observers = [
+                GitHubReviewReconciler(
+                    reconciler._sessionmaker,
+                    reconciler._valkey,
+                    reconciler._settings,
+                    external,
+                )
+                for _ in range(2)
+            ]
+            first = asyncio.create_task(observers[0].reconcile_terminal())
+            try:
+                await asyncio.wait_for(posting.wait(), 10)
+                assert await asyncio.wait_for(observers[1].reconcile_terminal(), 10) == 0
+            finally:
+                release.set()
+            assert await asyncio.wait_for(first, 10) == 1
+            notified = await asyncio.to_thread(
+                review_rows,
+                "SELECT status,error_code,notice_marker "
+                "FROM curie.github_review_feedback",
+            )
+            assert len(notified) == 1
+            assert notified[0]["status"] == "refused"
+            assert notified[0]["error_code"] == "history_capacity_notified"
+            marker = notified[0]["notice_marker"]
+            assert isinstance(marker, uuid.UUID)
+            assert str(marker) in truth.comment_posts[0]
+            assert await observers[1].reconcile_terminal() == 0
+            assert await asyncio.to_thread(
+                review_rows,
+                "SELECT status,error_code,notice_marker "
+                "FROM curie.github_review_feedback",
+            ) == notified
+            assert len(truth.issue_comments) == 1
+            assert len(truth.comment_posts) == 1
+
+    client.portal.call(competing)
+
+
 @pytest.mark.parametrize("terminal", ["ordinary", "unrelated"])
 def test_other_review_terminal_does_not_post_a_capacity_failure(review_stack, terminal) -> None:
     client, truth, valkey, stream = review_stack
@@ -3342,6 +3405,64 @@ def test_review_terminal_observer_never_cancels_consumed_publication_or_reuses_a
     assert review_rows("SELECT status FROM curie.approvals WHERE id=:id", {
         "id": publication.json()["approval_id"]
     }) == [{"status": "pending"}]
+
+
+def test_consumed_review_history_capacity_still_posts_pr_failure(review_stack) -> None:
+    client, truth, valkey, stream = review_stack
+    base, payload, headers = _review_reserve_request(review_stack)
+    reserved = client.post(base + "/reserve", json=payload, headers=headers)
+    assert reserved.status_code == 200, reserved.text
+    publication = client.post(
+        "/v1/internal/publications",
+        headers=headers,
+        json={
+            "deployment_id": payload["deployment_id"],
+            "conversation_id": scoped_conversation_id(
+                "slack", "C0EXAMPLE1", payload["turn"]["conversation_id"]
+            ),
+            "repo_full_name": REPO,
+            "author": payload["turn"]["author"],
+            "summary": "Review revision fixture",
+            "reply_kind": "slack",
+            "reply_channel": "C0EXAMPLE1",
+            "reply_conversation_id": payload["turn"]["conversation_id"],
+            "reply_placeholder": "1700000000.000003",
+            "dedupe_key": f"review-publication-{uuid.uuid4()}",
+            "review_origin_key": truth.feedback.event_id,
+            "base_sha": HEAD,
+            "patch_b64": base64.b64encode(b"diff --git a/a b/a\n").decode(),
+            "changed_paths": ["a"],
+            "expires_in_seconds": 600,
+        },
+    )
+    assert publication.status_code == 201, publication.text
+    assert publication.json()["id"] == reserved.json()["reservation_id"]
+    assert review_rows(
+        "SELECT status FROM curie.publication_review_reservations"
+    ) == [{"status": "consumed"}]
+
+    _write_review_history_capacity_terminal(client, valkey, truth.feedback.event_id, stream)
+    reconciler = client.app.state.github_review_reconciler
+    assert client.portal.call(reconciler.reconcile_terminal) == 1
+    assert review_rows(
+        "SELECT status,error_code FROM curie.github_review_feedback"
+    ) == [{"status": "settled", "error_code": "history_capacity_notified"}]
+    assert len(truth.issue_comments) == 1
+    assert truth.feedback.event_id in truth.issue_comments[0]["body"]
+    assert truth.feedback.url in truth.issue_comments[0]["body"]
+    assert client.portal.call(reconciler.reconcile_terminal) == 0
+    assert len(truth.comment_posts) == 1
+    assert review_rows(
+        "SELECT status FROM curie.publication_review_reservations"
+    ) == [{"status": "consumed"}]
+    assert review_rows(
+        "SELECT status FROM curie.publications WHERE id=:id",
+        {"id": publication.json()["id"]},
+    ) == [{"status": "pending"}]
+    assert review_rows(
+        "SELECT status FROM curie.approvals WHERE id=:id",
+        {"id": publication.json()["approval_id"]},
+    ) == [{"status": "pending"}]
 
 
 HELD_INDEX = "curie:github-review:held"

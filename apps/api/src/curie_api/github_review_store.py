@@ -686,9 +686,12 @@ class GitHubReviewReconciler:
                     # writer and must never be cancelled by this observer.
                 if dead_lettered:
                     row.status, row.error_code = "dead_lettered", "delivery_dead_lettered"
-                elif terminal == "history_capacity" and not consumed:
-                    row.status, row.error_code = "refused", "history_capacity"
-                    row.notice_marker = uuid.uuid4()
+                elif terminal == "history_capacity":
+                    row.status = "settled" if consumed else "refused"
+                    if row.error_code != "history_capacity_notified":
+                        row.error_code = "history_capacity"
+                    if row.notice_marker is None:
+                        row.notice_marker = uuid.uuid4()
                 else:
                     row.status = "settled" if consumed or not row.error_code else "refused"
                     if consumed:
@@ -716,7 +719,7 @@ class GitHubReviewReconciler:
                 GitHubReviewFeedback.created_at,
                 GitHubReviewFeedback.error_code,
             ).where(
-                GitHubReviewFeedback.status == "refused",
+                GitHubReviewFeedback.status.in_(("refused", "settled")),
                 GitHubReviewFeedback.error_code.in_(
                     ("history_capacity", "history_capacity_notified")
                 ),
@@ -747,7 +750,7 @@ class GitHubReviewReconciler:
                 row = await session.scalar(
                     select(GitHubReviewFeedback).where(
                         GitHubReviewFeedback.event_id == candidate,
-                        GitHubReviewFeedback.status == "refused",
+                        GitHubReviewFeedback.status.in_(("refused", "settled")),
                         GitHubReviewFeedback.error_code == "history_capacity",
                     ).with_for_update(skip_locked=True)
                 )
