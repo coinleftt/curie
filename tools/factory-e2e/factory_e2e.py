@@ -4479,9 +4479,9 @@ def judge_quiesce(obs: Mapping[str, Any]) -> list[str]:
         failures.append(f"path B: marker cleared after {clear_b!r}s, bound {immediate}s")
     if obs.get("path_b_terminated_logged") is not True:
         failures.append("path B: drain pod log lacks the terminated line")
-    code_b = obs.get("path_b_helm_exit_code")
-    if not isinstance(code_b, int) or code_b == 0:
-        failures.append(f"path B: helm upgrade exit {code_b!r}")
+    # Helm treats a deleted hook Job as finished and goes on to roll, so path B's
+    # helm exit is recorded (path_b_helm_exit_code) but is not the proof; the
+    # terminated log line and the clear time are.
     if obs.get("final_state") != "claims_enabled":
         failures.append(f"final claim state was {obs.get('final_state')!r}")
     return failures

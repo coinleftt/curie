@@ -2694,7 +2694,6 @@ def test_judge_quiesce_empty_obs_fails_without_raising() -> None:
         ("path_b_clear_seconds", 25.0),
         ("path_b_clear_seconds", None),
         ("path_b_terminated_logged", False),
-        ("path_b_helm_exit_code", 0),
         ("final_state", "quiescing"),
     ],
 )
@@ -2755,3 +2754,11 @@ def test_poll_until_clear_ignores_an_unknown_marker_read(monkeypatch: pytest.Mon
     cleared = fe._poll_until_clear(object(), fe.time.time(), 60, 0.1)  # type: ignore[arg-type]
     assert cleared is not None
     assert seen == ["quiescing", "unknown", "claims_enabled"]
+
+
+def test_judge_quiesce_does_not_require_path_b_helm_to_fail() -> None:
+    """Helm rolls on once its hook Job is deleted; the clear is what path B proves."""
+
+    obs = _passing_quiesce_obs()
+    obs["path_b_helm_exit_code"] = 0
+    assert fe.judge_quiesce(obs) == []

@@ -1252,12 +1252,14 @@ ssh with passwordless sudo and `crictl` on the drain pod's node (the node name,
 or `CURIE_FACTORY_NODE_SSH_HOST`); without it the run fails rather than passing
 on SIGTERM cleanup. Path B deletes the drain Job
 while a 20 minute upgrade still waits; the marker must clear within 10 s and
-the drain pod log must say the gate was terminated. The evidence judges
+the drain pod log must say the gate was terminated. Helm treats a deleted hook
+Job as finished and goes on with the upgrade, so path B records the helm exit
+code without judging it. The evidence judges
 `seed_status_before`, `baseline_state`, the `path_a_*` helm exit, elapsed,
 state and ttl fields, `doctor_worker_claims_line`, `paused_comment_found`,
 `queued_status_while_quiesced`, `path_a_clear_seconds`,
-`queued_status_after_release`, the `path_b_*` clear, log and helm exit
-fields, and `final_state`.
+`queued_status_after_release`, the `path_b_*` clear and
+log fields, and `final_state`.
 
 ### Reading work item outcomes
 
