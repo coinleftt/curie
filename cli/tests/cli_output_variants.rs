@@ -39,8 +39,8 @@ use curie::api::{
 };
 use curie::channel_token::ChannelTokenOutput;
 use curie::commands::{
-    ApprovalsOutput, BudgetOutput, ChannelsOutput, DeleteOutput, KillOutput, MemoryOutput,
-    OverridesOutput, PublicationPolicyOutput, ResetThreadOutput, ResumeOutput,
+    ApprovalsOutput, BudgetOutput, ChannelsOutput, DeleteOutput, HookOutput, KillOutput,
+    MemoryOutput, OverridesOutput, PublicationPolicyOutput, ResetThreadOutput, ResumeOutput,
     SkillApprovalsOutput, VersionsOutput, WorkItemsOutput,
 };
 use curie::comms::CommsOutput;
@@ -522,6 +522,19 @@ fn registry() -> BTreeMap<&'static str, Vec<VariantJson>> {
         samples![
             "DryRun" => CommsOutput::DryRun(plan()),
             "Done" => CommsOutput::Done { connected: true },
+        ],
+    );
+    m.insert(
+        "HookOutput",
+        samples![
+            "DryRun" => HookOutput::DryRun(plan()),
+            "Config" => HookOutput::Config {
+                id: "11111111-1111-4111-8111-111111111111".to_string(),
+                agent: "acme-bot".to_string(),
+                hook_partitions: Some(BTreeMap::new()),
+                source_bindings: Some(BTreeMap::new()),
+            },
+            "Secret" => HookOutput::Secret { secret: "example-secret".to_string() },
         ],
     );
     m.insert(
