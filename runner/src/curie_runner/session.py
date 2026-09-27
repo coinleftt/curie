@@ -23,6 +23,7 @@ import contextlib
 import hmac
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 
 import anyio
@@ -87,6 +88,8 @@ SessionFactory = Callable[[], ModelSession]
 _CONNECTOR_RECOVERY_BUDGET_SECONDS = 20.0
 _HISTORY_PERSISTENCE_BUDGET_SECONDS = 15.0
 _HISTORY_REPLAY_EXPORT_BUDGET_SECONDS = 5.0
+_CAPACITY_ADMISSION_TIMEOUT_S = 30.0
+_CAPACITY_ADMISSION_HISTORY = 1024
 # Re-dials the connectors named by the current failures and returns the ones
 # still failing (#2634). Bound by ``build_runner`` over the materialized servers.
 ConnectorReprobe = Callable[
@@ -205,6 +208,7 @@ def _apply_approval_override(final: Final, state: TurnState) -> Final:
             approval_route=state.approval_route,
             approval_gate_kind=state.approval_gate_kind,
             approval_granted_tool=state.approval_granted_tool,
+            approval_granted_arguments=state.approval_granted_arguments,
             approval_display=state.approval_display,
         )
     return final
@@ -345,6 +349,9 @@ class SessionRunner:
         self._timeout_interrupt_settled: anyio.Event | None = None
         self._timeout_interrupt_delivered = False
         self._turn_epoch: str | None = None
+        self._admission_gate: anyio.Event | None = None
+        self._admission_granted = False
+        self._admission_results: OrderedDict[str, str] = OrderedDict()
         self._status = SessionStatus.IDLE_AWAITING_INPUT
         self._started = False
         # True only while a turn can still accept a steer: from turn start until
@@ -377,6 +384,39 @@ class SessionRunner:
         """True while a turn can still accept a steer (open, pre-terminal)."""
 
         return self._turn_open
+
+    @property
+    def active_turn_epoch(self) -> str | None:
+        """The exact turn owning the lock, for authenticated worker status."""
+
+        return self._turn_epoch if self._turn_open else None
+
+    def admission_result(self, turn_epoch: str) -> str:
+        """Return the private admission decision for one exact runner epoch."""
+
+        return self._admission_results.get(turn_epoch, "unknown")
+
+    def _remember_admission(self, turn_epoch: str, result: str) -> None:
+        self._admission_results[turn_epoch] = result
+        self._admission_results.move_to_end(turn_epoch)
+        while len(self._admission_results) > _CAPACITY_ADMISSION_HISTORY:
+            self._admission_results.popitem(last=False)
+
+    def admit_turn(self, turn_epoch: str, *, allow: bool) -> bool:
+        """Resolve a capacity turn before any connector or model work begins."""
+
+        gate = self._admission_gate
+        if (
+            gate is None
+            or gate.is_set()
+            or not self._turn_open
+            or self._turn_epoch != turn_epoch
+        ):
+            return False
+        self._admission_granted = allow
+        self._remember_admission(turn_epoch, "granted" if allow else "denied")
+        gate.set()
+        return True
 
     @property
     def history_durable(self) -> bool:
@@ -536,6 +576,7 @@ class SessionRunner:
                 state.approval_route = None
                 state.approval_gate_kind = None
                 state.approval_granted_tool = None
+                state.approval_granted_arguments = None
                 state.approval_display = None
                 state.approval_halt_requested = False
                 self._status = SessionStatus.CLASSIFIED_FAILURE
@@ -673,6 +714,11 @@ class SessionRunner:
         self._timeout_requested = True
         self._timeout_interrupt_settled = timeout_interrupt_settled
         if not self._turn_ready:
+            # A capacity turn may still be waiting for its admission decision.
+            # Wake that gate so an exact timeout can retire it promptly.
+            gate = self._admission_gate
+            if gate is not None and not gate.is_set():
+                gate.set()
             # Accepted turn still in connector recovery (#2634): no query was
             # sent, so there is nothing for an SDK interrupt to stop. run_turn
             # checks the flag after recovery and emits the timeout terminal.
@@ -713,6 +759,7 @@ class SessionRunner:
         *,
         parent: Context | None = None,
         turn_epoch: str | None = None,
+        admission_required: bool = False,
     ) -> AsyncGenerator[str]:
         """Run one turn, streaming ACI NDJSON lines and enforcing the budget.
 
@@ -726,12 +773,16 @@ class SessionRunner:
 
         async with self._turn_lock:
             start = time.monotonic()
-            logger.info("turn start session=%s user=%s", self._session_id, event.user)
             self._interrupt_requested = False
             self._timeout_requested = False
             self._timeout_interrupt_settled = None
             self._timeout_interrupt_delivered = False
             self._turn_epoch = turn_epoch
+            self._admission_gate = anyio.Event() if admission_required else None
+            self._admission_granted = False
+            if admission_required:
+                assert turn_epoch is not None
+                self._remember_admission(turn_epoch, "pending")
             self._persistence_owned = False
             self._turn_open = True
             self._history_durable = False
@@ -756,6 +807,7 @@ class SessionRunner:
             }
             record_metric("curie.turn.accepted", attributes=metric_attributes)
             metrics_emitted = False
+            terminal_for_log = False
 
             def emit_completed_metrics() -> None:
                 """Emit the terminal metric pair once, synchronously."""
@@ -784,7 +836,37 @@ class SessionRunner:
                     approval_decision=self._approval_decision,
                     parent=parent,
                 ) as gen:
+                    logger.info("turn start session=%s user=%s", self._session_id, event.user)
                     try:
+                        if admission_required:
+                            gate = self._admission_gate
+                            assert gate is not None
+                            try:
+                                with anyio.fail_after(_CAPACITY_ADMISSION_TIMEOUT_S):
+                                    await gate.wait()
+                            except TimeoutError:
+                                self._admission_granted = False
+                            if not self._admission_granted:
+                                assert turn_epoch is not None
+                                if self.admission_result(turn_epoch) == "pending":
+                                    self._remember_admission(turn_epoch, "denied")
+                                self._turn_open = False
+                                self._turn_ready = False
+                                self._status = SessionStatus.CLASSIFIED_FAILURE
+                                metric_outcome = "classified_failure"
+                                gen.finish_turn(
+                                    interrupt_requested=False,
+                                    classified_failure=True,
+                                )
+                                terminal_for_log = True
+                                yield to_ndjson_line(
+                                    Final(
+                                        text="turn was not admitted",
+                                        status=SessionStatus.CLASSIFIED_FAILURE,
+                                    )
+                                )
+                                return
+                            self._admission_gate = None
                         if self._history_capacity_exceeded:
                             self._history_loss_observed = True
                             self._history_durable = False
@@ -797,6 +879,8 @@ class SessionRunner:
                                 classified_failure=True,
                             )
                             for line in _history_capacity_lines():
+                                if isinstance(parse_ndjson_line(line), Final):
+                                    terminal_for_log = True
                                 yield line
                             return
                         await self._refresh_connector_failures()
@@ -813,6 +897,7 @@ class SessionRunner:
                                 interrupt_requested=self._interrupt_requested,
                                 classified_failure=True,
                             )
+                            terminal_for_log = True
                             yield to_ndjson_line(
                                 Final(
                                     text="run timed out",
@@ -831,6 +916,7 @@ class SessionRunner:
                                 interrupt_requested=True,
                                 classified_failure=False,
                             )
+                            terminal_for_log = True
                             yield to_ndjson_line(
                                 Final(
                                     text="run interrupted",
@@ -845,13 +931,8 @@ class SessionRunner:
                                 # Final reaches the consumer, even if it closes
                                 # without requesting the generator's next item.
                                 metric_outcome = self._metric_outcome(tracker)
+                                terminal_for_log = True
                             yield line
-                        logger.info(
-                            "turn end session=%s status=%s duration_ms=%d",
-                            self._session_id,
-                            self._status.value,
-                            int((time.monotonic() - start) * 1000),
-                        )
                         metric_outcome = self._metric_outcome(tracker)
                     except Exception as exc:  # noqa: BLE001 - the ACI stream must
                         # always terminate in a final; a raised SDK/transport error
@@ -874,6 +955,7 @@ class SessionRunner:
                                 interrupt_requested=self._interrupt_requested,
                                 classified_failure=True,
                             )
+                            terminal_for_log = True
                             yield to_ndjson_line(
                                 Final(
                                     text="run timed out",
@@ -893,6 +975,7 @@ class SessionRunner:
                                 interrupt_requested=True,
                                 classified_failure=False,
                             )
+                            terminal_for_log = True
                             yield to_ndjson_line(
                                 Final(
                                     text="run interrupted",
@@ -916,6 +999,7 @@ class SessionRunner:
                                     classification="runner-error",
                                 )
                             )
+                            terminal_for_log = True
                             yield to_ndjson_line(
                                 Final(
                                     text="run failed",
@@ -939,6 +1023,7 @@ class SessionRunner:
                                 )
                                 metric_outcome = self._metric_outcome(tracker)
                                 emit_completed_metrics()
+                                terminal_for_log = True
                         finally:
                             # The SDK serializes this turn's stop and any later
                             # query onto one locked stdin stream. Wait until the
@@ -977,6 +1062,13 @@ class SessionRunner:
                                 self._turn_ready = False
                                 self._turn_epoch = None
             finally:
+                if terminal_for_log:
+                    logger.info(
+                        "turn end session=%s status=%s duration_ms=%d",
+                        self._session_id,
+                        self._status.value,
+                        int((time.monotonic() - start) * 1000),
+                    )
                 self._active_state = None
                 if self._approval_gate is not None:
                     self._approval_gate.clear_publication_context()
@@ -987,6 +1079,8 @@ class SessionRunner:
                     self._turn_open = False
                     self._turn_ready = False
                     self._turn_epoch = None
+                    self._admission_gate = None
+                    self._admission_granted = False
                     self._timeout_interrupt_settled = None
                     self._timeout_interrupt_delivered = False
 
@@ -1226,6 +1320,10 @@ class SessionRunner:
             status = SessionStatus.CLASSIFIED_FAILURE
         elif self._interrupt_requested:
             status = SessionStatus.IDLE_AWAITING_INPUT
+        elif state.error_classification is not None:
+            # An assistant error without a result is a failed turn. Translation
+            # already maps raw SDK tokens, so unknown tokens stay unclassified.
+            status = SessionStatus.CLASSIFIED_FAILURE
         else:
             status = SessionStatus.DONE
         self._merge_gate_block(state)
@@ -1643,6 +1741,7 @@ class SessionRunner:
             state.approval_route = gate.pending_route
             state.approval_gate_kind = gate.pending_gate_kind
             state.approval_granted_tool = gate.pending_granted_tool
+            state.approval_granted_arguments = gate.pending_granted_arguments
         elif gate.policy_requested:
             if gate.policy_rejected:
                 # The route could not be resolved: no approval exists, so the
@@ -1651,6 +1750,7 @@ class SessionRunner:
                 state.approval_display = None
                 state.approval_route = None
                 state.approval_gate_kind = None
+                state.approval_granted_arguments = None
             else:
                 state.approval_route = gate.policy_route
                 # #558: an operator-opted grantable gate mints the one-shot grant; the tool
@@ -1658,6 +1758,7 @@ class SessionRunner:
                 # non-grantable route resolves to None -> no grant, preserving #544's default.
                 # gate_kind stays 'policy' (stamped in translate.py).
                 state.approval_granted_tool = gate.grantable_tool_for_route(gate.policy_route)
+                state.approval_granted_arguments = None
 
         if gate.pending_summary and not state.approval_summary:
             state.approval_summary = gate.pending_summary
@@ -1665,6 +1766,7 @@ class SessionRunner:
             state.approval_route = gate.pending_route
             state.approval_gate_kind = gate.pending_gate_kind
             state.approval_granted_tool = gate.pending_granted_tool
+            state.approval_granted_arguments = gate.pending_granted_arguments
 
         # See the "Approval halt" bullet above: an operator interrupt outranks a
         # runner-requested one, so the marker is copied only in its absence.

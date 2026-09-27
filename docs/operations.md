@@ -840,7 +840,9 @@ so Curie can re-read the issue, keep its one status comment, and set the
 `curie-factory:*` state labels. **Metadata: Read** is already implied by repository
 installation discovery.
 
-Give the App **Checks: Read**, **Commit statuses: Read**, and **Actions: Read**.
+Give the App **Checks: Read** and **Commit statuses: Read** (the factory
+preflight names whichever of those two the installation does not grant), and
+**Actions: Read**.
 The Actions permission lets repair rounds include the failing job's log tail.
 Without it, CI verdicts still use checks and commit statuses; the repair prompt
 keeps the check summary and says `Job log unavailable.` After a factory
@@ -1157,7 +1159,7 @@ forks work with no further step.
 A missing input is refused, with every missing name listed, before the cluster
 or GitHub is touched. `curie dev factory-e2e run --scenario <name>` runs the
 preflight and then one scenario driver: `issue-to-pr`, `revision`,
-`cancel-waiting`, `cancel-running` or `evaluation`. `evaluation` runs six
+`cancel-waiting`, `cancel-running`, `quiesce` or `evaluation`. `evaluation` runs six
 labelled tickets (a correct change, a seeded failing test, an ambiguous
 request, an unavailable dependency, an execution-deadline budget, and a
 malicious instruction) on the configured model and again on
@@ -1257,6 +1259,30 @@ of the three runs `curie cluster work-items <id> --json` at every state it
 judges and requires exit 0 with the api's state and request statuses, and
 requires exit 1 for an unknown id. The evidence records every id, delivery,
 comment, pull request head, status seen with its time, and CLI read.
+
+`run --scenario quiesce [--issue-file <ticket.md>]` is the live proof for
+issue #3198 that the worker upgrade quiesce marker clears after a cancelled
+`helm upgrade`. It needs `CURIE_FACTORY_MODEL_API_KEY` so the seed request
+stays `running`. Path A runs `helm upgrade --reuse-values --timeout 60s`, which
+the client cancels while the drain gate waits; the marker must stay
+`quiescing` on a lease no longer than one drain lease, `curie doctor` must
+report `marker expires in`, and a second labelled issue must stay `waiting`
+with the paused-for-upgrade status comment. The driver then SIGKILLs the drain
+process through the node's container runtime, so no SIGTERM handler can clear
+the marker, and deletes the Job. The marker must read `claims_enabled` within
+one lease plus slack, and a worker must claim the queued request. The kill needs
+ssh with passwordless sudo and `crictl` on the drain pod's node (the node name,
+or `CURIE_FACTORY_NODE_SSH_HOST`); without it the run fails rather than passing
+on SIGTERM cleanup. Path B deletes the drain Job
+while a 20 minute upgrade still waits; the marker must clear within 10 s and
+the drain pod log must say the gate was terminated. Helm treats a deleted hook
+Job as finished and goes on with the upgrade, so path B records the helm exit
+code without judging it. The evidence judges
+`seed_status_before`, `baseline_state`, the `path_a_*` helm exit, elapsed,
+state and ttl fields, `doctor_worker_claims_line`, `paused_comment_found`,
+`queued_status_while_quiesced`, `path_a_clear_seconds`,
+`queued_status_after_release`, the `path_b_*` clear and
+log fields, and `final_state`.
 
 ### Reading work item outcomes
 
@@ -1732,11 +1758,20 @@ re-supplied or the upgrade rotates them out from under a running database.
 
 ```bash
 helm get values <release> -n <ns> -o yaml > values.yaml
-helm upgrade <release> <chart> -n <ns> -f values.yaml
+helm upgrade <release> <chart> -n <ns> -f values.yaml --timeout <minimum>s
 ```
 
-`curie cluster up` and `curie apply` do this without asking the operator to
-choose `--reuse-values` versus `--reset-then-reuse-values`. They persist
+Set `<minimum>` from the `curie.ai/minimum-helm-timeout-seconds` annotation on
+the chart's rendered pre-upgrade drain Job, using the same chart, values file,
+and overrides as the upgrade. That annotation accounts for the effective drain
+wait, the Job's 120 second allowance, the effective worker termination grace,
+and 60 seconds for scheduling and Helm operations. The default is 2940 seconds.
+Raising `worker.deliveryBudgetSeconds` raises the effective drain wait and
+termination grace automatically, so read the annotation for the customized
+values instead of reusing the default timeout.
+
+`curie cluster up` and `curie apply` preserve values without asking the operator
+to choose `--reuse-values` versus `--reset-then-reuse-values`. They persist
 `config.schemaVersion` on the release, run pure migrations from supported
 v0.8.x user values onto the v0.9.0 schema (legacy extraEnv entries with a
 first-class successor, external Secret references), and overlay the result so
@@ -1770,7 +1805,7 @@ helm get values <release> -n <ns> -o yaml > values.yaml
 helm list -n <ns>                       # note the revision
 
 # 3. Upgrade
-helm upgrade <release> <chart> -n <ns> -f values.yaml
+helm upgrade <release> <chart> -n <ns> -f values.yaml --timeout <minimum>s
 
 # 4. Import into RustFS
 IP=$(kubectl get svc -n <ns> <release>-rustfs -o jsonpath='{.spec.clusterIP}')

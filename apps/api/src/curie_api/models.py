@@ -497,6 +497,12 @@ class Approval(Base):
     # which is the rolling-deploy window the worker's prefix fallback covers.
     gate_kind: Mapped[str | None] = mapped_column(default=None)
     granted_tool: Mapped[str | None] = mapped_column(default=None)
+    # Canonical arguments of the denied permission gated call. NULL on old
+    # approvals and policy gates; an empty object is a real argument value.
+    # Kept private to the worker's resume lookup bound to the agent.
+    granted_arguments: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), default=None
+    )
     # Server-owned purpose. ``publication`` suppresses the ordinary model wake;
     # requester equality follows the same approver-set rule for every purpose.
     purpose: Mapped[str] = mapped_column(server_default="session", default="session")
@@ -1215,6 +1221,9 @@ class GitHubReviewFeedback(Base):
         CheckConstraint(
             "enqueue_attempts >= 0", name="github_review_feedback_attempts_ck"
         ),
+        CheckConstraint(
+            "notice_scan_page >= 1", name="github_review_feedback_notice_scan_page_ck"
+        ),
         Index("ix_github_review_feedback_pending", "status", "created_at"),
     )
 
@@ -1252,6 +1261,8 @@ class GitHubReviewFeedback(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     queued_at: Mapped[datetime | None] = mapped_column(default=None)
     terminal_scan_cursor: Mapped[str | None] = mapped_column(default=None)
+    notice_marker: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), default=None)
+    notice_scan_page: Mapped[int] = mapped_column(default=1, server_default="1")
 
 
 class Publication(Base):
@@ -1340,6 +1351,11 @@ class Publication(Base):
     # these bytes while preserving the audit/result metadata.
     patch_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, default=None)
     changed_paths: Mapped[list[str]] = mapped_column(JSONB)
+    observed_title_sha256: Mapped[str | None] = mapped_column(default=None)
+    observed_body_sha256: Mapped[str | None] = mapped_column(default=None)
+    metadata_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
     title: Mapped[str]
     body: Mapped[str] = mapped_column(Text)
     reply_kind: Mapped[str]

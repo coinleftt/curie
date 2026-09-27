@@ -28,6 +28,8 @@ use super::command::{mask_secret, plain, require_on_path, run_capture, CommonOpt
 // `worker.upgradeDrain.timeoutSeconds` in the chart).
 const DRAIN_TIMEOUT_ENV: &str = "CURIE_UPGRADE_DRAIN_TIMEOUT_SECS";
 const DRAIN_TIMEOUT_DEFAULT_SECS: u64 = 30;
+const HELM_TIMEOUT_DEFAULT_SECS: u64 = 15 * 60;
+const MINIMUM_HELM_TIMEOUT_ANNOTATION: &str = "curie.ai/minimum-helm-timeout-seconds";
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TEST_FAIL_AT_ENV: &str = "CURIE_UPGRADE_TEST_FAIL_AT";
 const TEST_INTERRUPT_AFTER_ENV: &str = "CURIE_UPGRADE_TEST_INTERRUPT_AFTER";
@@ -205,6 +207,12 @@ struct UpgradeRecord {
     from_version: Option<String>,
     known_good_version: Option<String>,
     completed: Vec<UpgradePhase>,
+    /// Phases passed over without executing: a same-version rerun's
+    /// DrainPreflight through Apply, a fresh install's DrainPreflight. Kept
+    /// apart from `completed` so the record never claims work that did not
+    /// run (#2861); absent from checkpoints older binaries persisted.
+    #[serde(default)]
+    skipped: Vec<UpgradePhase>,
     status: String,
     plan: Vec<String>,
     /// Whether the DrainPreflight worker-reachability check has already run
@@ -615,10 +623,10 @@ fn status_from_record(
     }
 }
 
-fn remaining_after(completed: &[UpgradePhase]) -> Vec<UpgradePhase> {
+fn remaining_after(record: &UpgradeRecord) -> Vec<UpgradePhase> {
     UpgradePhase::ALL
         .into_iter()
-        .filter(|p| !completed.contains(p))
+        .filter(|p| !record.completed.contains(p) && !record.skipped.contains(p))
         .collect()
 }
 
@@ -629,6 +637,7 @@ fn plan_lines(
     schema_plan: Option<&str>,
     retained_values: bool,
     runner_layer_clears: &[String],
+    helm_timeout_seconds: u64,
 ) -> Vec<String> {
     let apply = helm_upgrade_argv(
         opts,
@@ -636,6 +645,7 @@ fn plan_lines(
         from.is_none(),
         retained_values.then_some(RETAINED_VALUES_PLACEHOLDER),
         runner_layer_clears,
+        helm_timeout_seconds,
     );
     let from = from.unwrap_or("none");
     let mut lines = vec![
@@ -670,7 +680,7 @@ fn plan_lines(
     }
     if let Some((source_url, cache_path)) = opts.chart.pending_release() {
         lines.push(format!(
-            "phase validate pending: chart metadata and schema compatibility after release chart download from {source_url} to {cache_path}"
+            "phase validate pending: chart metadata, schema compatibility, and Helm timeout after release chart download from {source_url} to {cache_path}"
         ));
     }
     lines
@@ -827,6 +837,10 @@ trait UpgradeDriver {
     fn runner_layer_clears(&self) -> Vec<String> {
         Vec::new()
     }
+
+    fn helm_timeout_seconds(&self) -> u64 {
+        HELM_TIMEOUT_DEFAULT_SECS
+    }
     fn redact(&self, text: &str) -> String {
         match self.secret() {
             Some(secret) => text.replace(secret, &mask_secret(secret)),
@@ -885,14 +899,33 @@ async fn run_lifecycle_inner<H: UpgradeDriver>(
         bail!("--to requires a target version");
     }
     let from = host.current();
-    let plan = plan_lines(
+    let same_version = from.as_deref() == Some(opts.to.as_str())
+        && host.known_good().as_deref() == Some(opts.to.as_str());
+    let mut plan = plan_lines(
         &opts,
         from.as_deref(),
         host.secret(),
         host.schema_plan().as_deref(),
         host.retained_values(),
         &host.runner_layer_clears(),
+        host.helm_timeout_seconds(),
     );
+    if same_version {
+        // #2861: the rerun runs no Helm upgrade, so the plan must not show one.
+        plan.retain(|line| {
+            !line.starts_with("helm upgrade ")
+                && !line.starts_with("phase drain_preflight:")
+                && !line.starts_with("phase checkpoint:")
+                && !line.starts_with("phase migrate:")
+        });
+        plan.insert(
+            2,
+            format!(
+                "phases drain_preflight, checkpoint, migrate, apply skipped: {} is already installed and known-good, so no helm upgrade runs; converge, canary and commit re-verify it",
+                opts.to
+            ),
+        );
+    }
     let mut plan: Vec<String> = plan.into_iter().map(|l| host.redact(&l)).collect();
 
     if opts.common.dry_run {
@@ -941,6 +974,7 @@ async fn run_lifecycle_inner<H: UpgradeDriver>(
             from_version: from.clone(),
             known_good_version: host.known_good(),
             completed: Vec::new(),
+            skipped: Vec::new(),
             status: "in_progress".into(),
             plan: plan.clone(),
             drain_completed: false,
@@ -951,16 +985,13 @@ async fn run_lifecycle_inner<H: UpgradeDriver>(
         },
     };
 
-    let same_version = from.as_deref() == Some(opts.to.as_str())
-        && host.known_good().as_deref() == Some(opts.to.as_str());
-
     // Resume after Validate still honors a freshly computed refusal and
     // must not replay DrainPreflight to reach it.
     if host.validate_refusal().is_some() || host.refuse_config() || host.refuse_schema() {
         execute_phase(UpgradePhase::Validate, &opts, host, &mut record)?;
     }
 
-    for phase in remaining_after(&record.completed) {
+    for phase in remaining_after(&record) {
         if same_version
             && matches!(
                 phase,
@@ -970,12 +1001,12 @@ async fn run_lifecycle_inner<H: UpgradeDriver>(
                     | UpgradePhase::Apply
             )
         {
-            record.completed.push(phase);
+            record.skipped.push(phase);
             host.store_record(record.clone())?;
             continue;
         }
         if phase == UpgradePhase::DrainPreflight && from.is_none() {
-            record.completed.push(phase);
+            record.skipped.push(phase);
             host.store_record(record.clone())?;
             continue;
         }
@@ -1281,6 +1312,10 @@ struct LiveHost {
     schema_refusal: Option<String>,
     /// Layered agents whose runner stops matching the target runner (#3218).
     runner_layer_clears: Vec<String>,
+    /// The target chart's rendered drain budget, computed with the exact
+    /// retained overlay that Apply will hand to Helm.
+    helm_timeout_seconds: u64,
+    timeout_refusal: Option<String>,
     holder: String,
     checkpoint_resource_version: Option<String>,
     checkpoint_data_present: bool,
@@ -1310,6 +1345,7 @@ fn helm_upgrade_argv(
     install: bool,
     values: Option<&str>,
     runner_layer_clears: &[String],
+    timeout_seconds: u64,
 ) -> Vec<String> {
     let chart = chart_ref(opts);
     let mut argv = vec![
@@ -1320,11 +1356,12 @@ fn helm_upgrade_argv(
         "-n".into(),
         opts.common.namespace.clone(),
         "--wait".into(),
-        // Helm's --wait default timeout is 5m. A kind 0.9.1 -> 0.9.0 apply
-        // with the schema-migrate hook overruns that, apply bails, and the
-        // checkpoint stays in_progress so the next --to is refused.
         "--timeout".into(),
-        "15m".into(),
+        if timeout_seconds == HELM_TIMEOUT_DEFAULT_SECS {
+            "15m".into()
+        } else {
+            format!("{timeout_seconds}s")
+        },
     ];
     if opts.chart.uses_helm_version() {
         argv.push("--version".into());
@@ -1343,6 +1380,52 @@ fn helm_upgrade_argv(
         argv.push(pair);
     }
     argv
+}
+
+/// A disabled drain emits no Job. An emitted drain Job must carry an exact,
+/// positive integer budget so the CLI can cover the chart's gate and worker
+/// grace without guessing from values that Helm may have overridden.
+fn parse_target_helm_timeout(rendered: &str) -> Result<u64> {
+    let mut timeout = None;
+    for document in serde_norway::Deserializer::from_str(rendered) {
+        let value = serde_json::Value::deserialize(document)
+            .context("target Helm timeout manifest is malformed")?;
+        if value.get("kind").and_then(serde_json::Value::as_str) != Some("Job")
+            || value
+                .pointer("/metadata/labels/app.kubernetes.io~1component")
+                .and_then(serde_json::Value::as_str)
+                != Some("upgrade-drain")
+        {
+            continue;
+        }
+        if timeout.is_some() {
+            bail!("target chart rendered more than one upgrade drain Job");
+        }
+        let annotations = value
+            .pointer("/metadata/annotations")
+            .and_then(serde_json::Value::as_object)
+            .context("target upgrade drain Job has no annotations")?;
+        if annotations
+            .get("helm.sh/hook")
+            .and_then(serde_json::Value::as_str)
+            != Some("pre-upgrade")
+        {
+            bail!("target upgrade drain Job is not a pre-upgrade hook");
+        }
+        let raw = annotations
+            .get(MINIMUM_HELM_TIMEOUT_ANNOTATION)
+            .and_then(serde_json::Value::as_str)
+            .context("target upgrade drain Job has no minimum Helm timeout annotation")?;
+        let seconds = raw
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds > 0)
+            .context("target upgrade drain Job has an invalid minimum Helm timeout annotation")?;
+        timeout = Some(seconds);
+    }
+    Ok(timeout
+        .unwrap_or(HELM_TIMEOUT_DEFAULT_SECS)
+        .max(HELM_TIMEOUT_DEFAULT_SECS))
 }
 
 /// Stands in for the retained values tempfile in the printed plan, which never
@@ -1429,6 +1512,8 @@ impl LiveHost {
             schema_decision: None,
             schema_refusal: None,
             runner_layer_clears: Vec::new(),
+            helm_timeout_seconds: HELM_TIMEOUT_DEFAULT_SECS,
+            timeout_refusal: None,
             holder: uuid::Uuid::new_v4().to_string(),
             checkpoint_resource_version: None,
             checkpoint_data_present: false,
@@ -1798,6 +1883,16 @@ impl LiveHost {
         }
         if self.opts.chart.pending_release().is_none() {
             self.compute_schema_compat();
+            if self.current.is_some()
+                && self.chart_refusal.is_none()
+                && self.config_refusal.is_none()
+                && self.schema_refusal.is_none()
+            {
+                match self.render_target_helm_timeout() {
+                    Ok(seconds) => self.helm_timeout_seconds = seconds,
+                    Err(error) => self.timeout_refusal = Some(format!("{error:#}")),
+                }
+            }
         }
         self.compute_runner_layer_clears();
     }
@@ -1858,6 +1953,35 @@ impl LiveHost {
             return None;
         }
         serde_norway::from_str(&out).ok()
+    }
+
+    fn render_target_helm_timeout(&self) -> Result<u64> {
+        let mut args = vec![
+            plain("template"),
+            plain(&self.opts.common.release),
+            plain(self.chart_ref()),
+            plain("-n"),
+            plain(&self.opts.common.namespace),
+            plain("--is-upgrade"),
+        ];
+        if self.opts.chart.uses_helm_version() {
+            args.push(plain("--version"));
+            args.push(plain(&self.opts.to));
+        }
+        let tmp = tempfile::NamedTempFile::new().context("upgrade values tempfile")?;
+        if let Some(overlay) = &self.overlay {
+            std::fs::write(tmp.path(), overlay).context("could not write upgrade values")?;
+            args.push(plain("-f"));
+            args.push(plain(tmp.path().to_string_lossy().into_owned()));
+        }
+        let (ok, out, err) = self.run(&OpsCommand::new("helm", args))?;
+        if !ok {
+            bail!(
+                "could not render target Helm timeout metadata: {}",
+                crate::schema_window::redact_probe_text(err.trim())
+            );
+        }
+        parse_target_helm_timeout(&out)
     }
 
     fn compute_schema_compat(&mut self) {
@@ -2213,6 +2337,7 @@ impl LiveHost {
             self.current.is_none(),
             values.as_deref(),
             &self.runner_layer_clears,
+            self.helm_timeout_seconds,
         )
         .into_iter()
         .skip(1)
@@ -2347,10 +2472,15 @@ impl UpgradeDriver for LiveHost {
     fn runner_layer_clears(&self) -> Vec<String> {
         self.runner_layer_clears.clone()
     }
+
+    fn helm_timeout_seconds(&self) -> u64 {
+        self.helm_timeout_seconds
+    }
     fn validate_refusal(&self) -> Option<String> {
         self.chart_refusal
             .clone()
             .or_else(|| self.config_refusal.clone())
+            .or_else(|| self.timeout_refusal.clone())
             .or_else(|| self.schema_refusal.clone())
     }
     fn refuse_config(&self) -> bool {

@@ -2104,7 +2104,7 @@
         "type": "object"
       },
       "ApprovalRequest": {
-        "description": "A durable approval request (#244), created by the worker when a run ends\nawaiting-approval.\n\n``dedupe_key`` is the triggering event id, so a redelivered turn adopts the\nexisting record instead of forking a second one. ``route``/``card_channel``\n(#247) record the manifest route the request named and the channel the worker\nrouted the card to after binding resolution; the authorizer proves membership\nagainst ``card_channel``. ``gate_kind``/``granted_tool`` are the durable gate\nprovenance (#544, Decision C) written by the runner; both stay optional for\nthe rolling-deploy window.\n\n``reply_kind``/``reply_channel`` are the durable twin of ``ReplyHandle``'s\nrouting pair (ADR-0096), and ``reply_adapter`` the durable twin of its egress\nselector. ``reply_kind`` is REQUIRED, deliberately unlike ``gate_kind`` above:\nan absent kind puts the silent misroute back on the resume path, where it is\nleast observable, and ADR-0096 phase 2 buys the right to reject it with a\nquiescent cutover rather than a rolling-deploy window. ``reply_adapter`` is\nnullable because ``slack`` legitimately has no adapter -- its route is the\nworker's configured Slack origin.",
+        "description": "A durable approval request (#244), created by the worker when a run ends\nawaiting-approval.\n\n``dedupe_key`` is the triggering event id, so a redelivered turn adopts the\nexisting record instead of forking a second one. ``route``/``card_channel``\n(#247) record the manifest route the request named and the channel the worker\nrouted the card to after binding resolution; the authorizer proves membership\nagainst ``card_channel``. ``gate_kind``/``granted_tool`` are the durable gate\nprovenance (#544, Decision C) written by the runner; both stay optional for\nthe rolling-deploy window.\n\n``granted_arguments`` is the canonical JSON object of the denied permission\ngated call (#3255), carried independently of the human summary. It is\noptional for older producers, while an empty object remains a real value.\n\n``reply_kind``/``reply_channel`` are the durable twin of ``ReplyHandle``'s\nrouting pair (ADR-0096), and ``reply_adapter`` the durable twin of its egress\nselector. ``reply_kind`` is REQUIRED, deliberately unlike ``gate_kind`` above:\nan absent kind puts the silent misroute back on the resume path, where it is\nleast observable, and ADR-0096 phase 2 buys the right to reject it with a\nquiescent cutover rather than a rolling-deploy window. ``reply_adapter`` is\nnullable because ``slack`` legitimately has no adapter -- its route is the\nworker's configured Slack origin.",
         "properties": {
           "agent_id": {
             "anyOf": [
@@ -2165,6 +2165,18 @@
                 "type": "null"
               }
             ]
+          },
+          "granted_arguments": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Granted Arguments"
           },
           "granted_tool": {
             "anyOf": [
@@ -3000,6 +3012,35 @@
             "minItems": 1,
             "title": "Phases",
             "type": "array"
+          },
+          "reviewer_model": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewer Model"
+          },
+          "stages": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/StageDeclaration"
+                },
+                "maxItems": 12,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stages"
           }
         },
         "required": [
@@ -3962,6 +4003,19 @@
         "title": "HookRunRef",
         "type": "object"
       },
+      "HookSecretOut": {
+        "properties": {
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret"
+        ],
+        "title": "HookSecretOut",
+        "type": "object"
+      },
       "KillState": {
         "description": "Whether an agent is currently killed (kill switch, L1).",
         "properties": {
@@ -4809,7 +4863,6 @@
               "type": "string"
             },
             "maxItems": 4096,
-            "minItems": 1,
             "title": "Changed Paths",
             "type": "array"
           },
@@ -4840,8 +4893,55 @@
             ],
             "title": "Expires In Seconds"
           },
+          "observed_body_sha256": {
+            "anyOf": [
+              {
+                "pattern": "[0-9a-f]{64}",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Body Sha256"
+          },
+          "observed_lineage_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Lineage Id"
+          },
+          "observed_lineage_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Lineage Version"
+          },
+          "observed_title": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Title"
+          },
           "patch_b64": {
-            "minLength": 1,
             "title": "Patch B64",
             "type": "string"
           },
@@ -5021,6 +5121,18 @@
             "title": "Lease Owner",
             "type": "string"
           },
+          "metadata_updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata Updated At"
+          },
           "pr_number": {
             "exclusiveMinimum": 0.0,
             "title": "Pr Number",
@@ -5050,7 +5162,8 @@
           "lease_owner",
           "pr_number",
           "pr_url",
-          "head_sha"
+          "head_sha",
+          "metadata_updated_at"
         ],
         "title": "PublicationLineageAdvance",
         "type": "object"
@@ -6428,6 +6541,38 @@
           "trace_url"
         ],
         "title": "SourceTraceOut",
+        "type": "object"
+      },
+      "StageDeclaration": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "phases": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 12,
+            "minItems": 1,
+            "title": "Phases",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "phases"
+        ],
+        "title": "StageDeclaration",
         "type": "object"
       },
       "StartBody": {
@@ -9060,6 +9205,65 @@
         "summary": "Get Cost",
         "tags": [
           "control"
+        ]
+      }
+    },
+    "/agents/{agent_id}/hook-secret": {
+      "get": {
+        "operationId": "get_hook_secret_agents__agent_id__hook_secret_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookSecretOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Hook Secret",
+        "tags": [
+          "agents"
         ]
       }
     },
