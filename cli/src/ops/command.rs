@@ -54,6 +54,9 @@ pub enum CmdArg {
         keys: Vec<String>,
         document: serde_json::Value,
     },
+    /// A whole helm values document that may hold secret material, delivered
+    /// as a private `-f <path>` and never displayed.
+    SecretValuesDocument(serde_json::Value),
 }
 
 impl CmdArg {
@@ -69,7 +72,8 @@ impl CmdArg {
             CmdArg::SecretSet { key, value } => vec![format!("{key}={value}")],
             CmdArg::SecretValuesFile(_)
             | CmdArg::PrivateJsonValuesFile(_)
-            | CmdArg::SecretPatchFile { .. } => {
+            | CmdArg::SecretPatchFile { .. }
+            | CmdArg::SecretValuesDocument(_) => {
                 debug_assert!(
                     false,
                     "SecretValuesFile must be materialized before argv(); \
@@ -106,6 +110,9 @@ impl CmdArg {
                     "-f".to_string(),
                     format!("<secret values file: {}>", masked.join(", ")),
                 ]
+            }
+            CmdArg::SecretValuesDocument(_) => {
+                vec!["-f".to_string(), "<secret values document>".to_string()]
             }
             CmdArg::SecretPatchFile { keys, .. } => vec![
                 "--patch-file".to_string(),
@@ -189,6 +196,12 @@ impl OpsCommand {
                 }
                 CmdArg::PrivateJsonValuesFile(values) => {
                     let guard = SecretValuesFileGuard::write_document(&values.0)?;
+                    new_args.push(plain("-f"));
+                    new_args.push(plain(guard.path.to_string_lossy().into_owned()));
+                    guards.push(guard);
+                }
+                CmdArg::SecretValuesDocument(document) => {
+                    let guard = SecretValuesFileGuard::write_document(document)?;
                     new_args.push(plain("-f"));
                     new_args.push(plain(guard.path.to_string_lossy().into_owned()));
                     guards.push(guard);

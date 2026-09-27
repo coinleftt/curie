@@ -2116,6 +2116,25 @@ def test_the_created_record_carries_the_turns_kind_and_adapter(make_harness) -> 
     asyncio.run(go())
 
 
+def test_session_approval_carries_a_finite_deadline(make_harness) -> None:
+    """A session approval the worker creates has a finite SLA so the existing
+    sweeper can wake a turn nobody resolves.
+    """
+
+    async def go() -> None:
+        approvals = RecordingApprovals()
+        async with make_harness(approvals=approvals) as h:
+            h.runner.default_script = _awaiting_script("Give ACME a 20% discount")
+            await h.kernel.process_event(_qevent("discount?", event_id="ev-appr-deadline"))
+
+            assert len(approvals.requests) == 1
+            req = approvals.requests[0]
+            assert req.expires_in_seconds is not None
+            assert req.expires_in_seconds == 24 * 60 * 60
+
+    asyncio.run(go())
+
+
 def test_a_slack_turns_record_carries_slack_and_no_adapter(make_harness) -> None:
     """T-A12, the sibling lane. Slack legitimately has no adapter (its route is
     the worker's configured origin, D4.4), so its record must persist NULL rather

@@ -3836,6 +3836,19 @@
         "title": "HookRunRef",
         "type": "object"
       },
+      "HookSecretOut": {
+        "properties": {
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret"
+        ],
+        "title": "HookSecretOut",
+        "type": "object"
+      },
       "KillState": {
         "description": "Whether an agent is currently killed (kill switch, L1).",
         "properties": {
@@ -4605,7 +4618,6 @@
               "type": "string"
             },
             "maxItems": 4096,
-            "minItems": 1,
             "title": "Changed Paths",
             "type": "array"
           },
@@ -4636,8 +4648,55 @@
             ],
             "title": "Expires In Seconds"
           },
+          "observed_body_sha256": {
+            "anyOf": [
+              {
+                "pattern": "[0-9a-f]{64}",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Body Sha256"
+          },
+          "observed_lineage_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Lineage Id"
+          },
+          "observed_lineage_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Lineage Version"
+          },
+          "observed_title": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Title"
+          },
           "patch_b64": {
-            "minLength": 1,
             "title": "Patch B64",
             "type": "string"
           },
@@ -4817,6 +4876,18 @@
             "title": "Lease Owner",
             "type": "string"
           },
+          "metadata_updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata Updated At"
+          },
           "pr_number": {
             "exclusiveMinimum": 0.0,
             "title": "Pr Number",
@@ -4846,7 +4917,8 @@
           "lease_owner",
           "pr_number",
           "pr_url",
-          "head_sha"
+          "head_sha",
+          "metadata_updated_at"
         ],
         "title": "PublicationLineageAdvance",
         "type": "object"
@@ -8462,6 +8534,65 @@
         "summary": "Get Cost",
         "tags": [
           "control"
+        ]
+      }
+    },
+    "/agents/{agent_id}/hook-secret": {
+      "get": {
+        "operationId": "get_hook_secret_agents__agent_id__hook_secret_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookSecretOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Hook Secret",
+        "tags": [
+          "agents"
         ]
       }
     },

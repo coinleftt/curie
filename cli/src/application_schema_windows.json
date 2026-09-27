@@ -58,11 +58,13 @@
     "0056",
     "0057",
     "0058",
-    "0059"
+    "0059",
+    "0060",
+    "0061"
   ],
   "candidate": {
-    "schema_min": "0045",
-    "schema_head": "0059"
+    "schema_min": "0060",
+    "schema_head": "0061"
   },
   "windows": {
     "0.8.0": {
@@ -140,8 +142,8 @@
       "schema_head": "0058"
     },
     "0.10.2": {
-      "schema_min": "0045",
-      "schema_head": "0059"
+      "schema_min": "0060",
+      "schema_head": "0061"
     }
   }
 }

@@ -136,9 +136,9 @@ fn stable_v0100_sorts_after_its_release_candidate_for_fail_forward() {
     );
 }
 
-/// Released 0.9.1 reports catalog head 0044. This tree's packaged chart keeps
-/// the 0045 floor and continues through the current head 0059, so the
-/// pending live migrations are 0045 through 0059 and the upgrade applies.
+/// Released 0.9.1 reports catalog head 0044. The packaged chart applies
+/// expansions through 0059, requires forward only for contract 0060, then
+/// applies expansion 0061.
 #[test]
 fn v091_source_upgrades_through_the_packaged_chart_graph() {
     let source = window_for("0.9.1").expect("0.9.1 is catalogued");
@@ -147,8 +147,8 @@ fn v091_source_upgrades_through_the_packaged_chart_graph() {
             .expect("packaged chart schema compatibility metadata parses");
 
     assert_eq!(source.schema_head, "0044");
-    assert_eq!(target.schema_min, "0045");
-    assert_eq!(target.schema_head, "0059");
+    assert_eq!(target.schema_min, "0060");
+    assert_eq!(target.schema_head, "0061");
 
     let pending =
         pending_revisions(Some("0044"), &target).expect("0044 reaches the packaged chart head");
@@ -157,21 +157,38 @@ fn v091_source_upgrades_through_the_packaged_chart_graph() {
         revisions,
         [
             "0045", "0046", "0047", "0048", "0049", "0050", "0051", "0052", "0053", "0054", "0055",
-            "0056", "0057", "0058", "0059"
+            "0056", "0057", "0058", "0059", "0060", "0061"
         ]
     );
-    assert!(pending.iter().all(|step| step.kind == "expand"));
+    let contracts: Vec<&str> = pending
+        .iter()
+        .filter(|step| step.kind == "contract")
+        .map(|step| step.revision.as_str())
+        .collect();
+    assert_eq!(contracts, ["0060"]);
+    assert!(pending
+        .iter()
+        .all(|step| step.kind == "expand" || step.revision == "0060"));
 
-    let decision = plan_upgrade(
+    let refused = plan_upgrade(
         Some("0044"),
         &target,
         &pending,
         false,
         Some(&source.schema_head),
     );
+    assert_eq!(refused.action, "refuse");
+
+    let decision = plan_upgrade(
+        Some("0044"),
+        &target,
+        &pending,
+        true,
+        Some(&source.schema_head),
+    );
     assert_eq!(decision.action, "apply");
     assert_eq!(decision.source_head.as_deref(), Some("0044"));
-    assert_eq!(decision.target_min, "0045");
+    assert_eq!(decision.target_min, "0060");
 }
 
 fn write_exec(dir: &Path, name: &str, body: &str) {

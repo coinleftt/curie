@@ -6135,6 +6135,8 @@ mod tests {
         Agent {
             id: format!("id-{name}"),
             name: name.to_string(),
+            hook_partitions: None,
+            source_bindings: None,
             channels: channels
                 .iter()
                 .map(|c| crate::api::ChannelBinding {
@@ -7475,6 +7477,8 @@ mod tests {
             Agent {
                 id: "a1".into(),
                 name: "one".into(),
+                hook_partitions: None,
+                source_bindings: None,
                 channels: vec![crate::api::ChannelBinding {
                     kind: "slack".into(),
                     address: "C1".into(),
@@ -7494,6 +7498,8 @@ mod tests {
             Agent {
                 id: "a2".into(),
                 name: "two".into(),
+                hook_partitions: None,
+                source_bindings: None,
                 channels: vec![crate::api::ChannelBinding {
                     kind: "slack".into(),
                     address: "C2".into(),

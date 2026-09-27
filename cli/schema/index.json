@@ -148,6 +148,12 @@
       "version": "1.1"
     },
     {
+      "result": "HookOutput",
+      "kind": "CliOutput",
+      "schema": "hooks.schema.json",
+      "version": "1.0"
+    },
+    {
       "result": "InitOutput",
       "kind": "CliOutput",
       "schema": "init.schema.json",
