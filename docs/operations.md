@@ -1253,8 +1253,10 @@ or `CURIE_FACTORY_NODE_SSH_HOST`); without it the run fails rather than passing
 on SIGTERM cleanup. Path B deletes the drain Job
 while a 20 minute upgrade still waits; the marker must clear within 10 s and
 the drain pod log must say the gate was terminated. Helm treats a deleted hook
-Job as finished and goes on with the upgrade, so path B records the helm exit
-code without judging it. The evidence judges
+Job as finished, so the chart's later attest hook refuses the upgrade unless
+this revision recorded a successful drain. Path B still records the helm exit
+code without judging it: this scenario proves the marker clear, and the exit
+code is evidence for that refusal rather than a pass condition here. The evidence judges
 `seed_status_before`, `baseline_state`, the `path_a_*` helm exit, elapsed,
 state and ttl fields, `doctor_worker_claims_line`, `paused_comment_found`,
 `queued_status_while_quiesced`, `path_a_clear_seconds`,
