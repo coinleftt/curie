@@ -674,7 +674,8 @@ def test_a_stale_generation_owner_writes_no_marker_clears_nothing_and_emits_noth
             )
             assert (
                 await store.release(
-                    h.config.stream, h.config.consumer_group, entry_id, owner=stale.owner
+                    h.config.stream, h.config.consumer_group, entry_id, owner=stale.owner,
+                    resume_event_id=None,
                 )
                 is True
             )

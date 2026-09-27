@@ -5586,7 +5586,8 @@ async def _leased_entry(h: Any, store: Any, *, event_id: str, generation: int) -
     for _ in range(generation):
         if lease is not None:
             await store.release(
-                h.config.stream, h.config.consumer_group, entry_id, owner=lease.owner
+                h.config.stream, h.config.consumer_group, entry_id, owner=lease.owner,
+                resume_event_id=None,
             )
         lease = await store.acquire(
             h.config.stream,
@@ -5881,7 +5882,8 @@ def test_an_unreadable_runner_fails_closed_and_leaves_a_reclaimed_delivery_pendi
                 consumer=h.config.consumer_name,
             )
             await store.release(
-                h.config.stream, h.config.consumer_group, entry_id, owner=first.owner
+                h.config.stream, h.config.consumer_group, entry_id, owner=first.owner,
+                resume_event_id=None,
             )
 
             h.runner.status_fails = True
