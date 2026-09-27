@@ -40,6 +40,7 @@ from curie_worker import kernel as kernel_module
 from curie_worker.actions import ActionClient
 from curie_worker.attachments import PreparedAttachments
 from curie_worker.behaviorpacks import BehaviorPacks
+from curie_worker.capacity_wait import CapacityWaitRequested
 from curie_worker.kernel import ThreadBusyError
 from curie_worker.reply_sink import TargetRoute
 from curie_worker.runner_client import RunnerError, TurnStream
@@ -3189,7 +3190,7 @@ def test_retries_are_bounded_then_escalate(make_harness) -> None:
 
 
 @pytest.mark.parametrize("slack_no_edit_streaming", [False, True])
-def test_quota_capacity_is_terminal_without_retry_or_runner_turn(
+def test_quota_capacity_requests_wait_without_retry_or_runner_turn(
     make_harness, slack_no_edit_streaming: bool
 ) -> None:
     async def go() -> None:
@@ -3207,20 +3208,19 @@ def test_quota_capacity_is_terminal_without_retry_or_runner_turn(
             endpoint = "http://127.0.0.1:43199"
             ev = _qevent("go", endpoint=endpoint)
 
-            await h.kernel.process_event(ev)
+            with pytest.raises(CapacityWaitRequested):
+                await h.kernel.process_event(ev)
 
-            expected = (
-                "This agent is at capacity right now. Please try again shortly."
-            )
-            expected_updates = [("C1", "p-1", expected)]
+            expected_updates = []
             if not slack_no_edit_streaming:
-                expected_updates.insert(0, ("C1", "p-1", h.config.booting_text))
+                expected_updates.append(("C1", "p-1", h.config.booting_text))
             assert h.sink.updates == expected_updates
             assert h.sink.update_endpoints == [endpoint] * len(expected_updates)
             assert len(h.fake_k8s.claim_envs) == 1
             assert h.runner.opened == []
             assert h.kernel._order_locks == {}
-            assert await h.async_redis.exists(h.config.done_key(ev.event_id))
+            assert not await h.async_redis.exists(h.config.done_key(ev.event_id))
+            assert h.sink.completions == []
 
     asyncio.run(go())
 
@@ -3290,7 +3290,8 @@ def test_valid_quota_evidence_reaches_budget_gate_before_inventory(
             )
             h.fake_k8s.quota_rejection = rejection
 
-            await h.kernel.process_event(_qevent("start", thread="tValidQuota"))
+            with pytest.raises(CapacityWaitRequested):
+                await h.kernel.process_event(_qevent("start", thread="tValidQuota"))
 
             assert outcomes == ["refused-no-budget"]
             assert h.runner.opened == []
@@ -3367,10 +3368,11 @@ def test_invalid_quota_evidence_refuses_before_inventory_or_deletion(
             event_id = "invalid-quota-trigger"
             lease = await _pressure_lease(h, event_id)
 
-            await h.kernel.process_event(
-                _qevent("start", thread="tInvalidQuotaTrigger", event_id=event_id),
-                lease=lease,
-            )
+            with pytest.raises(CapacityWaitRequested):
+                await h.kernel.process_event(
+                    _qevent("start", thread="tInvalidQuotaTrigger", event_id=event_id),
+                    lease=lease,
+                )
 
             assert h.substrate.lookup(candidate.thread_key) == candidate
             assert candidate.claim_name not in h.fake_k8s.deleted_claims
@@ -3758,10 +3760,11 @@ def test_unknown_detach_stops_after_real_eval_without_later_probe_or_retry(
             lease = await _pressure_lease(h, event_id)
             claims_before = len(h.fake_k8s.claim_envs)
 
-            await h.kernel.process_event(
-                _qevent("start", thread="tUnknownDetachTrigger", event_id=event_id),
-                lease=lease,
-            )
+            with pytest.raises(CapacityWaitRequested):
+                await h.kernel.process_event(
+                    _qevent("start", thread="tUnknownDetachTrigger", event_id=event_id),
+                    lease=lease,
+                )
 
             assert detach_threads == [oldest.thread_key]
             assert status_tokens == [oldest.token]
@@ -3934,10 +3937,11 @@ def test_quota_pressure_preserves_routes_without_safe_idle_history_status(
             event_id = f"status-pressure-{unsafe_status}"
             lease = await _pressure_lease(h, event_id)
 
-            await h.kernel.process_event(
-                _qevent("start", thread="tStatusTrigger", event_id=event_id),
-                lease=lease,
-            )
+            with pytest.raises(CapacityWaitRequested):
+                await h.kernel.process_event(
+                    _qevent("start", thread="tStatusTrigger", event_id=event_id),
+                    lease=lease,
+                )
 
             assert h.substrate.lookup(_thread_key(thread)) == candidate
             assert candidate.claim_name not in h.fake_k8s.deleted_claims
@@ -4054,10 +4058,11 @@ def test_quota_pressure_loses_races_without_deleting_the_candidate(
             event_id = f"pressure-race-{race}"
             lease = await _pressure_lease(h, event_id)
 
-            await h.kernel.process_event(
-                _qevent("start", thread="tRaceTrigger", event_id=event_id),
-                lease=lease,
-            )
+            with pytest.raises(CapacityWaitRequested):
+                await h.kernel.process_event(
+                    _qevent("start", thread="tRaceTrigger", event_id=event_id),
+                    lease=lease,
+                )
 
             route = h.substrate._affinity.get(thread_key)  # noqa: SLF001
             assert route == (replacement or original)
@@ -4095,10 +4100,11 @@ def test_contended_pressure_lock_is_skipped_within_its_short_bound(
             lease = await _pressure_lease(h, event_id)
 
             started = time.monotonic()
-            await h.kernel.process_event(
-                _qevent("start", thread="tContentionTrigger", event_id=event_id),
-                lease=lease,
-            )
+            with pytest.raises(CapacityWaitRequested):
+                await h.kernel.process_event(
+                    _qevent("start", thread="tContentionTrigger", event_id=event_id),
+                    lease=lease,
+                )
             elapsed = time.monotonic() - started
 
             assert elapsed < 0.75
@@ -4175,7 +4181,7 @@ def test_same_thread_followup_cannot_overtake_pressure_retry(make_harness) -> No
     asyncio.run(go())
 
 
-def test_capacity_refusal_releases_fifo_immediately_before_reply(
+def test_capacity_wait_request_releases_fifo_for_followup(
     make_harness,
 ) -> None:
     async def go() -> None:
@@ -4186,36 +4192,12 @@ def test_capacity_refusal_releases_fifo_immediately_before_reply(
             **_PRESSURE_LEASE_KNOBS,
         ) as h:
             h.fake_k8s.quota_rejection = _quota_rejection()
-            refusal_entered = asyncio.Event()
-            allow_refusal = asyncio.Event()
-            real_emit = h.sink.emit
-
-            async def emit(
-                event: ReplyEvent,
-                *,
-                route: TargetRoute,
-                best_effort_unreachable: bool = False,
-            ) -> ReplyAck:
-                if (
-                    event.event == "reply.update"
-                    and "capacity" in str(getattr(event, "text", "")).lower()
-                ):
-                    h.fake_k8s.quota_rejection = None
-                    refusal_entered.set()
-                    await allow_refusal.wait()
-                return await real_emit(
-                    event,
-                    route=route,
-                    best_effort_unreachable=best_effort_unreachable,
-                )
-
-            h.sink.emit = emit  # type: ignore[method-assign]
-            first = asyncio.create_task(
-                h.kernel.process_event(
+            with pytest.raises(CapacityWaitRequested):
+                await h.kernel.process_event(
                     _qevent("first", thread="tRefusalOrder")
                 )
-            )
-            await asyncio.wait_for(refusal_entered.wait(), timeout=2.0)
+            assert h.kernel._order_locks == {}
+            h.fake_k8s.quota_rejection = None
 
             hold = asyncio.Event()
             h.runner.hold = hold
@@ -4228,8 +4210,6 @@ def test_capacity_refusal_releases_fifo_immediately_before_reply(
             )
             await _wait_until(lambda: h.runner.opened == ["followup"])
 
-            allow_refusal.set()
-            await first
             hold.set()
             await second
             assert h.kernel._order_locks == {}
@@ -4255,16 +4235,17 @@ def test_second_quota_rejection_refuses_after_exactly_one_pressure_retry(
             event_id = "pressure-second-quota"
             lease = await _pressure_lease(h, event_id)
 
-            await h.kernel.process_event(
-                _qevent("start", thread="tRetryTrigger", event_id=event_id),
-                lease=lease,
-            )
+            with pytest.raises(CapacityWaitRequested):
+                await h.kernel.process_event(
+                    _qevent("start", thread="tRetryTrigger", event_id=event_id),
+                    lease=lease,
+                )
 
             assert len(h.fake_k8s.claim_envs) == 3
             assert h.fake_k8s.deleted_claims.count(candidate.claim_name) == 1
             assert h.runner.opened == []
-            assert h.sink.last_text is not None
-            assert "try again" in h.sink.last_text.lower()
+            assert not await h.async_redis.exists(h.config.done_key(event_id))
+            assert h.sink.completions == []
             assert outcomes == ["reclaimed-retry-refused"]
 
     asyncio.run(go())
@@ -4449,9 +4430,10 @@ def test_quota_without_delivery_budget_refuses_before_pressure_inventory(
             h.fake_k8s.quota_claim_capacity = 1
             h.fake_k8s.quota_rejection = _quota_rejection()
 
-            await h.kernel.process_event(
-                _qevent("start", thread="tNoBudgetTrigger")
-            )
+            with pytest.raises(CapacityWaitRequested):
+                await h.kernel.process_event(
+                    _qevent("start", thread="tNoBudgetTrigger")
+                )
 
             assert h.substrate.lookup(_thread_key("tNoBudgetCandidate")) == candidate
             assert candidate.claim_name not in h.fake_k8s.deleted_claims
@@ -4516,10 +4498,11 @@ def test_pressure_entry_refuses_when_current_budget_is_below_derived_floor(
             event_id = "pressure-low-budget"
             lease = await _pressure_lease(h, event_id)
 
-            await h.kernel.process_event(
-                _qevent("start", thread="tLowBudgetTrigger", event_id=event_id),
-                lease=lease,
-            )
+            with pytest.raises(CapacityWaitRequested):
+                await h.kernel.process_event(
+                    _qevent("start", thread="tLowBudgetTrigger", event_id=event_id),
+                    lease=lease,
+                )
 
             assert h.substrate.lookup(_thread_key("tLowBudgetCandidate")) == candidate
             assert candidate.claim_name not in h.fake_k8s.deleted_claims
@@ -4546,10 +4529,11 @@ def test_scan_cap_emits_one_incomplete_pressure_outcome(
             event_id = "pressure-scan-cap"
             lease = await _pressure_lease(h, event_id)
 
-            await h.kernel.process_event(
-                _qevent("start", thread="tScanCapTrigger", event_id=event_id),
-                lease=lease,
-            )
+            with pytest.raises(CapacityWaitRequested):
+                await h.kernel.process_event(
+                    _qevent("start", thread="tScanCapTrigger", event_id=event_id),
+                    lease=lease,
+                )
 
             assert h.substrate.lookup(_thread_key("tScanCapCandidate")) == candidate
             assert candidate.claim_name not in h.fake_k8s.deleted_claims
@@ -4568,7 +4552,7 @@ def test_expiry_unsupported_is_a_declared_finite_pressure_outcome(
     assert outcomes == ["expiry-unsupported"]
 
 
-def test_quota_refusal_keeps_operator_accounting_out_of_the_reply(
+def test_capacity_queued_notice_keeps_operator_accounting_out_of_the_reply(
     make_harness, caplog
 ) -> None:
     """The quota's identity and numbers go to the log, never to the person.
@@ -4599,12 +4583,16 @@ def test_quota_refusal_keeps_operator_accounting_out_of_the_reply(
             )
             h.fake_k8s.quota_rejection = rejection
 
+            event = _qevent("go")
             with caplog.at_level(logging.WARNING, logger="curie_worker.kernel"):
-                await h.kernel.process_event(_qevent("go"))
+                with pytest.raises(CapacityWaitRequested):
+                    await h.kernel.process_event(event)
+            await h.kernel.notify_capacity_queued(event)
 
             # Read off the rejection rather than retyping literals, so the two
             # halves of the boundary cannot drift apart.
             reply = h.sink.updates[-1][2]
+            assert "queued" in reply.lower()
             for leaked in {
                 rejection.quota_name,
                 *rejection.requested,
