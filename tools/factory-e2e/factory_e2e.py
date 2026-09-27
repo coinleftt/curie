@@ -39,7 +39,7 @@ the request waits on capacity, removes the label, and judges a direct
 `cancelled` with cause `issue_cancelled`. `cancel-running [--issue-file]`
 removes the label once the request runs and judges `cancellation_requested`
 then `cancelled`, and after a quiet window no pull request, branch or
-publication. Revision and cancel-running need CURIE_FACTORY_MODEL_API_KEY.
+publication. Revision, cancel-running and quiesce need CURIE_FACTORY_MODEL_API_KEY.
 Each of the three also checks `curie cluster work-items <id> --json` against
 the api at each state, and that an unknown id exits 1. `evaluation` runs the
 six acceptance cases on the configured model and again on the reference
@@ -47,6 +47,13 @@ model, plus one same-PR revision and both label-removal cancellations. Its
 hidden checks never enter the fixture repository. The command exits non-zero
 when the JSON report is missing a required field or any verdict is not
 passed.
+
+`quiesce [--issue-file]` proves #3198 once the seed request runs: a `helm
+upgrade` cancelled by its client timeout leaves the worker claim marker
+`quiescing` on a short renewed lease (read in a worker pod and through `curie
+doctor`), a second issue queued meanwhile shows the paused-for-upgrade status
+comment, and deleting the drain Job clears the marker within one lease so the
+queued request starts. A Job deleted while helm still waits clears it at once.
 
 The App, fixture repository, mention author and model credentials come only
 from operator files or environment variables; nothing here names a real one.
@@ -260,6 +267,7 @@ SCENARIOS: dict[str, ScenarioDriver | None] = {
     "cancel-waiting": None,
     "cancel-running": None,
     "evaluation": None,
+    "quiesce": None,
 }
 SCENARIO_NAMES = tuple(SCENARIOS)
 
@@ -853,6 +861,7 @@ def helm_upgrade_command(
     chart: str,
     namespace: str,
     values_file: str,
+    timeout: str,
 ) -> list[str]:
     """Upgrade without dropping values this command does not set.
 
@@ -875,7 +884,7 @@ def helm_upgrade_command(
         "-f",
         values_file,
         "--timeout",
-        "20m",
+        timeout,
     ]
 
 
@@ -2456,6 +2465,7 @@ class Preflight:
                 chart=str(self.chart_dir),
                 namespace=self.namespace,
                 values_file=str(values_file),
+                timeout="20m",
             )
         )
         for kind in ("deployment", "statefulset"):
@@ -4329,6 +4339,492 @@ SCENARIOS["evaluation"] = evaluation
 
 
 # --------------------------------------------------------------------------
+# Scenario: quiesce (#3198)
+# --------------------------------------------------------------------------
+
+QUIESCE_HELM_TIMEOUT = "60s"
+QUIESCE_HELM_TIMEOUT_SECONDS = 60
+QUIESCE_HELM_EXIT_SLACK_SECONDS = 120.0
+IMMEDIATE_CLEAR_SECONDS = 10.0
+QUIESCE_CLEAR_SLACK_SECONDS = 10.0
+QUIESCE_PAUSED_COMMENT_SECONDS = 300
+QUIESCE_RELEASE_CLAIM_SECONDS = 600
+QUIESCE_CHART_POLL_SECONDS = 5.0
+QUIESCE_CHART_TIMEOUT_SECONDS = 900.0
+CLAIM_STATES = frozenset({"claims_enabled", "quiescing", "unknown"})
+WORKER_SELECTOR = "app.kubernetes.io/component=worker"
+DRAIN_SELECTOR = "app.kubernetes.io/component=upgrade-drain"
+DRAIN_TERMINATED_LINE = "the drain gate was terminated while waiting"
+# Copied from apps/api/src/curie_api/factory_notices.py; a test pins the two equal.
+PAUSED_FOR_UPGRADE_LINE = (
+    "Paused: this Curie installation is paused for an upgrade. "
+    "Queued work starts when the upgrade finishes."
+)
+DEFAULT_QUIESCE_QUEUED_ISSUE = (
+    "Add a length conversion helper to unitconv",
+    "Add a helper that converts between metres and feet in the unitconv project, "
+    "with unit tests. Keep the change small.",
+)
+
+
+def parse_claim_status(stdout: str) -> dict[str, Any] | None:
+    """The last JSON object line whose ``state`` is a claim state. Pure."""
+
+    found: dict[str, Any] | None = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and value.get("state") in CLAIM_STATES:
+            found = value
+    return found
+
+
+def quiesce_lease_seconds(poll_interval_s: float, drain_timeout_s: float) -> float:
+    """The marker lease the drain gate holds: the worker's own rule. Pure."""
+
+    return float(min(max(30.0, 3.0 * poll_interval_s), drain_timeout_s))
+
+
+def paused_status_comment(
+    comments: Sequence[Mapping[str, Any]], *, mention: str, app_id: str | int
+) -> dict[str, Any] | None:
+    """The App status comment showing QUEUED with the paused-for-upgrade line. Pure."""
+
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if (
+            _app_authored(comment, mention, str(app_id))
+            and "Status: QUEUED" in body
+            and PAUSED_FOR_UPGRADE_LINE in body
+        ):
+            return dict(comment)
+    return None
+
+
+def _num(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def judge_quiesce(obs: Mapping[str, Any]) -> list[str]:
+    """Every way the quiesce proof failed. Pure; an empty ``obs`` fails."""
+
+    failures: list[str] = []
+    lease = _num(obs.get("lease_seconds")) or 30.0
+    immediate = _num(obs.get("immediate_clear_seconds")) or IMMEDIATE_CLEAR_SECONDS
+    slack = _num(obs.get("clear_slack_seconds")) or QUIESCE_CLEAR_SLACK_SECONDS
+    helm_timeout = _num(obs.get("helm_timeout_seconds")) or float(QUIESCE_HELM_TIMEOUT_SECONDS)
+
+    if obs.get("seed_status_before") != "running":
+        failures.append(f"seed request never ran (status {obs.get('seed_status_before')!r})")
+    if obs.get("baseline_state") != "claims_enabled":
+        failures.append(f"baseline claim state was {obs.get('baseline_state')!r}")
+    if obs.get("path_a_quiescing_seen") is not True:
+        failures.append("path A: no quiescing state seen while helm waited on the drain")
+    code = obs.get("path_a_helm_exit_code")
+    if not isinstance(code, int) or code == 0:
+        failures.append(f"path A: helm upgrade was not cancelled (exit {code!r})")
+    elapsed = _num(obs.get("path_a_helm_elapsed_seconds"))
+    if elapsed is None or elapsed > helm_timeout + QUIESCE_HELM_EXIT_SLACK_SECONDS:
+        failures.append(f"path A: helm took {elapsed!r}s to give up")
+    if obs.get("path_a_after_cancel_state") != "quiescing":
+        failures.append(
+            f"path A: claim state after cancel was {obs.get('path_a_after_cancel_state')!r}"
+        )
+    ttl = _num(obs.get("path_a_after_cancel_ttl"))
+    if ttl is None or ttl > lease:
+        failures.append(f"path A: marker ttl after cancel {ttl!r} exceeds the {lease}s lease")
+    if obs.get("path_a_drain_job_active_after_cancel") is not True:
+        failures.append("path A: the drain Job was not active after the cancel")
+    if "marker expires in" not in str(obs.get("doctor_worker_claims_line") or ""):
+        failures.append("curie doctor did not report the marker expiry")
+    if obs.get("paused_comment_found") is not True:
+        failures.append("no paused-for-upgrade status comment on the queued issue")
+    if obs.get("queued_status_while_quiesced") != "waiting":
+        failures.append(
+            f"queued request was {obs.get('queued_status_while_quiesced')!r} while quiesced"
+        )
+    if obs.get("path_a_after_renewal_state") != "quiescing":
+        failures.append(
+            f"path A: after the renewal window {obs.get('path_a_after_renewal_state')!r}"
+        )
+    renewal_ttl = _num(obs.get("path_a_after_renewal_ttl"))
+    if renewal_ttl is None or renewal_ttl > lease:
+        failures.append(f"path A: renewed ttl {renewal_ttl!r} exceeds the {lease}s lease")
+    clear_a = _num(obs.get("path_a_clear_seconds"))
+    if clear_a is None or clear_a > lease + slack:
+        failures.append(f"path A: marker cleared after {clear_a!r}s, bound {lease + slack}s")
+    if obs.get("queued_status_after_release") in (None, "waiting"):
+        failures.append("the queued request never left waiting after the marker cleared")
+    if obs.get("path_b_quiescing_seen") is not True:
+        failures.append("path B: no quiescing state seen")
+    clear_b = _num(obs.get("path_b_clear_seconds"))
+    if clear_b is None or clear_b > immediate:
+        failures.append(f"path B: marker cleared after {clear_b!r}s, bound {immediate}s")
+    if obs.get("path_b_terminated_logged") is not True:
+        failures.append("path B: drain pod log lacks the terminated line")
+    code_b = obs.get("path_b_helm_exit_code")
+    if not isinstance(code_b, int) or code_b == 0:
+        failures.append(f"path B: helm upgrade exit {code_b!r}")
+    if obs.get("final_state") != "claims_enabled":
+        failures.append(f"final claim state was {obs.get('final_state')!r}")
+    return failures
+
+
+def _claim_status(p: Preflight) -> dict[str, Any] | None:
+    pods = p.kubectl(
+        "-n",
+        p.namespace,
+        "get",
+        "pods",
+        "-l",
+        WORKER_SELECTOR,
+        "--field-selector=status.phase=Running",
+        "-o",
+        "name",
+        check=False,
+    ).split()
+    if not pods:
+        return None
+    out = p.kubectl(
+        "-n",
+        p.namespace,
+        "exec",
+        pods[0],
+        "-c",
+        "worker",
+        "--",
+        "python",
+        "-m",
+        "curie_worker.upgrade_drain",
+        "--mode",
+        "status",
+        "--json",
+        "--with-ttl",
+        check=False,
+    )
+    return parse_claim_status(out)
+
+
+def _drain_job(p: Preflight) -> dict[str, Any] | None:
+    raw = p.kubectl(
+        "-n", p.namespace, "get", "job", "-l", DRAIN_SELECTOR, "-o", "json", check=False
+    )
+    try:
+        items = json.loads(raw).get("items") or []
+    except ValueError:
+        return None
+    return items[0] if items else None
+
+
+def _drain_running_pod(p: Preflight) -> str | None:
+    names = p.kubectl(
+        "-n",
+        p.namespace,
+        "get",
+        "pods",
+        "-l",
+        DRAIN_SELECTOR,
+        "--field-selector=status.phase=Running",
+        "-o",
+        "name",
+        check=False,
+    ).split()
+    return names[0] if names else None
+
+
+def _drain_env(job: Mapping[str, Any] | None) -> dict[str, str]:
+    env: dict[str, str] = {}
+    containers = (((job or {}).get("spec") or {}).get("template") or {}).get("spec") or {}
+    for container in containers.get("containers") or []:
+        for item in container.get("env") or []:
+            if isinstance(item, dict) and "value" in item:
+                env[str(item.get("name"))] = str(item.get("value"))
+    return env
+
+
+def _doctor_claims_line(p: Preflight) -> str | None:
+    if p._kubeconfig is None:
+        p._kubeconfig = p._write_kubeconfig()
+    argv = [
+        p.config.curie_bin,
+        "doctor",
+        "--context",
+        p.config.kube_context,
+        "--namespace",
+        p.namespace,
+        "--release",
+        RELEASE,
+    ]
+    env = {
+        **os.environ,
+        "CURIE_API_KEY": p.api_key,
+        "KUBECONFIG": str(p._kubeconfig),
+        "CURIE_CONFIG_DIR": str(p._curie_config_dir()),
+    }
+    try:
+        result = subprocess.run(
+            argv, capture_output=True, text=True, env=env, check=False, timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    for line in (result.stdout + "\n" + result.stderr).splitlines():
+        if "worker claims" in line.lower():
+            return line.strip()
+    return None
+
+
+def _helm_popen(p: Preflight, values_file: Path, timeout: str) -> subprocess.Popen[str]:
+    argv = helm_upgrade_command(
+        context=p.config.kube_context,
+        release=RELEASE,
+        chart=str(p.chart_dir),
+        namespace=p.namespace,
+        values_file=str(values_file),
+        timeout=timeout,
+    )
+    return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+
+def _stop_proc(proc: subprocess.Popen[str] | None) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def _helm_stderr_tail(proc: subprocess.Popen[str]) -> str:
+    try:
+        return (proc.stderr.read() if proc.stderr else "")[-500:]
+    except (OSError, ValueError):
+        return ""
+
+
+def _poll_until_clear(p: Preflight, started: float, cap: float, every: float) -> float | None:
+    while time.time() - started < cap:
+        status = _claim_status(p)
+        if status is not None and status.get("state") != "quiescing":
+            return round(time.time() - started, 1)
+        time.sleep(every)
+    return None
+
+
+def quiesce(p: Preflight) -> dict[str, Any]:
+    """A cancelled or deleted drain gate leaves no lasting quiesce marker (#3198)."""
+
+    obs = _new_obs(p)
+    seed_work_item = obs["work_item_id"]
+    obs["seed_issue_number"] = p.issue_number
+    obs["seed_work_item_id"] = seed_work_item
+    obs["immediate_clear_seconds"] = IMMEDIATE_CLEAR_SECONDS
+    obs["clear_slack_seconds"] = QUIESCE_CLEAR_SLACK_SECONDS
+    obs["helm_timeout_seconds"] = QUIESCE_HELM_TIMEOUT_SECONDS
+    obs["lease_seconds"] = quiesce_lease_seconds(
+        QUIESCE_CHART_POLL_SECONDS, QUIESCE_CHART_TIMEOUT_SECONDS
+    )
+    obs["lease_source"] = "chart defaults"
+
+    log("quiesce: waiting for the seed request to run")
+    give_up = p.labelled_at + NEVER_STARTED_CAP_SECONDS
+    before: dict[str, Any] = {}
+    while time.time() < give_up:
+        before = _latest_request(p.work_item_detail(seed_work_item) or {}) or {}
+        status = before.get("status")
+        if status == "running" or (status and status not in ACTIVE_REQUEST_STATUSES):
+            break
+        time.sleep(3)
+    obs["seed_status_before"] = before.get("status")
+    _timeline(obs, "seed status", status=obs["seed_status_before"])
+    if obs["seed_status_before"] != "running":
+        return _finish(p, obs, judge_quiesce(obs))
+    baseline = _claim_status(p)
+    obs["baseline_state"] = (baseline or {}).get("state")
+    _timeline(obs, "claim state", state=obs["baseline_state"])
+
+    values_file = p.workdir / "quiesce-values.json"
+    fd = os.open(str(values_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write("{}")
+
+    helm_a: subprocess.Popen[str] | None = None
+    helm_b: subprocess.Popen[str] | None = None
+    logs_b: subprocess.Popen[str] | None = None
+    try:
+        # Path A: a helm upgrade whose client timeout cancels it mid-drain.
+        log("quiesce: path A, helm upgrade with a short timeout")
+        started = time.time()
+        helm_a = _helm_popen(p, values_file, QUIESCE_HELM_TIMEOUT)
+        seen: set[str] = set()
+        last_state = None
+        cap = QUIESCE_HELM_TIMEOUT_SECONDS + QUIESCE_HELM_EXIT_SLACK_SECONDS
+        while helm_a.poll() is None and time.time() - started < cap:
+            state = (_claim_status(p) or {}).get("state")
+            if state != last_state:
+                _timeline(obs, "claim state", state=state, path="A")
+                last_state = state
+            if state:
+                seen.add(state)
+            time.sleep(2)
+        if helm_a.poll() is None:
+            _stop_proc(helm_a)
+        obs["path_a_helm_exit_code"] = helm_a.returncode
+        obs["path_a_helm_elapsed_seconds"] = round(time.time() - started, 1)
+        obs["path_a_helm_stderr_tail"] = _helm_stderr_tail(helm_a)
+        obs["path_a_quiescing_seen"] = "quiescing" in seen
+
+        job = _drain_job(p)
+        env = _drain_env(job)
+        try:
+            poll = float(env["CURIE_UPGRADE_DRAIN_POLL_INTERVAL_S"])
+            timeout = float(env["CURIE_UPGRADE_DRAIN_TIMEOUT_S"])
+            obs["lease_seconds"] = quiesce_lease_seconds(poll, timeout)
+            obs["lease_source"] = "drain Job env"
+        except (KeyError, ValueError):
+            pass
+        lease = float(obs["lease_seconds"])
+        after = _claim_status(p) or {}
+        obs["path_a_after_cancel_state"] = after.get("state")
+        obs["path_a_after_cancel_ttl"] = after.get("ttl_seconds")
+        obs["path_a_drain_job_active_after_cancel"] = bool(
+            job and int((job.get("status") or {}).get("active") or 0) > 0
+        )
+        job_name = ((job or {}).get("metadata") or {}).get("name") or f"{RELEASE}-upgrade-drain"
+        obs["doctor_worker_claims_line"] = _doctor_claims_line(p)
+        cancelled_at = time.time()
+
+        # Paused comment: a second issue queued while the marker holds.
+        title, body = DEFAULT_QUIESCE_QUEUED_ISSUE
+        _open_case(p, title, body)
+        obs["queued_issue_number"] = p.issue_number
+        queued_work_item = str(p.evidence["work_item_id"])
+        obs["queued_work_item_id"] = queued_work_item
+        _timeline(obs, "queued issue opened", issue_number=p.issue_number)
+        deadline = time.time() + QUIESCE_PAUSED_COMMENT_SECONDS
+        found: dict[str, Any] | None = None
+        while time.time() < deadline and found is None:
+            comments = p._paged(f"/repos/{p.config.repo}/issues/{p.issue_number}/comments")
+            found = paused_status_comment(
+                comments, mention=p.config.mention, app_id=p.config.app_id
+            )
+            if found is None:
+                time.sleep(5)
+        obs["paused_comment_found"] = found is not None
+        if found is not None:
+            obs["paused_comment_excerpt"] = str(found.get("body") or "")[:400]
+        queued = _latest_request(p.work_item_detail(queued_work_item) or {}) or {}
+        obs["queued_status_while_quiesced"] = queued.get("status")
+
+        # Renewal: past one lease the Job still holds a short lease.
+        remaining = lease + 5 - (time.time() - cancelled_at)
+        if remaining > 0:
+            time.sleep(remaining)
+        renewed = _claim_status(p) or {}
+        obs["path_a_after_renewal_state"] = renewed.get("state")
+        obs["path_a_after_renewal_ttl"] = renewed.get("ttl_seconds")
+
+        # Clear: delete the Job and force-delete its pod; the marker lapses.
+        p.kubectl("-n", p.namespace, "delete", "job", job_name, "--wait=false", check=False)
+        p.kubectl(
+            "-n",
+            p.namespace,
+            "delete",
+            "pod",
+            "-l",
+            DRAIN_SELECTOR,
+            "--grace-period=0",
+            "--force",
+            "--wait=false",
+            check=False,
+        )
+        deleted = time.time()
+        obs["path_a_clear_seconds"] = _poll_until_clear(
+            p, deleted, lease + QUIESCE_CLEAR_SLACK_SECONDS + 30, 1.0
+        )
+        _timeline(obs, "path A cleared", seconds=obs["path_a_clear_seconds"])
+        deadline = time.time() + QUIESCE_RELEASE_CLAIM_SECONDS
+        status_after = None
+        while time.time() < deadline:
+            status_after = (_latest_request(p.work_item_detail(queued_work_item) or {}) or {}).get(
+                "status"
+            )
+            if status_after != "waiting":
+                break
+            time.sleep(5)
+        obs["queued_status_after_release"] = status_after
+        _timeline(obs, "queued status after release", status=status_after)
+
+        # Path B: delete the Job while helm is still waiting on it.
+        log("quiesce: path B, delete the drain Job mid-wait")
+        helm_b = _helm_popen(p, values_file, "20m")
+        deadline = time.time() + 180
+        pod = None
+        quiescing_b = False
+        while time.time() < deadline:
+            quiescing_b = quiescing_b or (_claim_status(p) or {}).get("state") == "quiescing"
+            pod = _drain_running_pod(p)
+            if quiescing_b and pod:
+                break
+            time.sleep(2)
+        obs["path_b_quiescing_seen"] = quiescing_b
+        log_path = p.workdir / "drain-b.log"
+        if pod:
+            log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(log_fd, "w") as log_handle:
+                logs_b = subprocess.Popen(
+                    [
+                        "kubectl",
+                        "--context",
+                        p.config.kube_context,
+                        "-n",
+                        p.namespace,
+                        "logs",
+                        "-f",
+                        pod,
+                    ],
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+            time.sleep(5)
+            job_b = _drain_job(p)
+            name_b = ((job_b or {}).get("metadata") or {}).get("name") or job_name
+            deleted_b = time.time()
+            p.kubectl("-n", p.namespace, "delete", "job", name_b, "--wait=false", check=False)
+            obs["path_b_clear_seconds"] = _poll_until_clear(p, deleted_b, 60, 0.5)
+        else:
+            obs["path_b_clear_seconds"] = None
+        _timeline(obs, "path B cleared", seconds=obs["path_b_clear_seconds"])
+        try:
+            helm_b.wait(timeout=300)
+        except subprocess.TimeoutExpired:
+            obs["path_b_helm_forced_stop"] = True
+            _stop_proc(helm_b)
+        obs["path_b_helm_exit_code"] = helm_b.returncode
+        obs["path_b_helm_stderr_tail"] = _helm_stderr_tail(helm_b)
+        _stop_proc(logs_b)
+        text = log_path.read_text(errors="replace") if log_path.exists() else ""
+        obs["path_b_terminated_logged"] = DRAIN_TERMINATED_LINE in text
+        obs["path_b_log_tail"] = text.splitlines()[-20:]
+        obs["final_state"] = (_claim_status(p) or {}).get("state")
+    finally:
+        _stop_proc(helm_a)
+        _stop_proc(helm_b)
+        _stop_proc(logs_b)
+    return _finish(p, obs, judge_quiesce(obs))
+
+
+SCENARIOS["quiesce"] = quiesce
+
+
+# --------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------
 
@@ -4374,7 +4870,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--issue-file",
         type=Path,
         help=(
-            "issue-to-pr, revision (required) and cancel-running (optional): Markdown "
+            "issue-to-pr, revision (required), cancel-running and quiesce (optional): "
+            "Markdown "
             "ticket, first line the title, the rest the body"
         ),
     )
@@ -4897,14 +5394,19 @@ def main(argv: list[str] | None = None) -> int:
                         raise ConfigError(
                             f"cannot read the revision file {args.revision_file}: {exc.strerror}"
                         ) from None
-            elif args.scenario == "cancel-running":
+            elif args.scenario in ("cancel-running", "quiesce"):
                 issue_spec = (
                     parse_issue_file(args.issue_file)
                     if args.issue_file is not None
                     else DEFAULT_CANCEL_RUNNING_ISSUE
                 )
         config = load_config(os.environ, context=args.context)
-        if args.mode == "run" and args.scenario in ("revision", "cancel-running", "evaluation"):
+        if args.mode == "run" and args.scenario in (
+            "revision",
+            "cancel-running",
+            "evaluation",
+            "quiesce",
+        ):
             if not config.model_api_key:
                 raise ConfigError(
                     f"{args.scenario} needs CURIE_FACTORY_MODEL_API_KEY: a fake model "
