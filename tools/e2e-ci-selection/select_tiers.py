@@ -156,6 +156,14 @@ def _needs_images(paths: list[str]) -> bool:
     return False
 
 
+RUNTIME_ASSERTION_DIR = "charts/curie/ci/runtime"
+
+
+def _is_runtime_assertion(path: str) -> bool:
+    parent, _, name = path.rpartition("/")
+    return parent == RUNTIME_ASSERTION_DIR and name.endswith(".sh")
+
+
 def _needs_cli_release(paths: list[str]) -> bool:
     if not paths:
         return True
@@ -259,6 +267,7 @@ def _run() -> None:
     args = _parser().parse_args()
     registry = _load_registry(args.registry)
 
+    paths: list[str] = []
     if args.push:
         if args.path or args.base or args.head:
             raise RegistryError("push cannot be combined with paths or revisions")
@@ -282,6 +291,11 @@ def _run() -> None:
 
     if args.omit_kind:
         selected.difference_update(KIND_TIERS)
+        # An added or changed cluster runtime assertion must run on the enforcing
+        # cluster rung before `E2E required` can pass (#3391), so omitting kind
+        # never drops the tier that proves it.
+        if any(_is_runtime_assertion(path) for path in paths):
+            selected.add("cluster")
 
     output_path = os.environ.get("GITHUB_OUTPUT")
     if not output_path:

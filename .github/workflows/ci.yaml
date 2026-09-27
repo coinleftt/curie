@@ -1657,6 +1657,7 @@ jobs:
       skill_local_tiers: ${{ steps.filter.outputs.skill_local_tiers }}
       images: ${{ steps.filter.outputs.images }}
       cli_release: ${{ steps.filter.outputs.cli_release }}
+      runtime_assertions: ${{ steps.runtime.outputs.runtime_assertions }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1698,6 +1699,23 @@ jobs:
               --registry .github/e2e-selection.yaml \
               --push
           fi
+      # Added or changed cluster runtime assertions (#3391). `E2E required`
+      # refuses a pull request verdict unless each is registered in an
+      # enforcing cluster job and left a pass receipt. The selector keeps the
+      # cluster tier for them on next pull requests too. Pushes and dispatches
+      # list none: every change reaches main or next through a pull request,
+      # which is where this gate holds the required verdict.
+      - id: runtime
+        run: |
+          set -euo pipefail
+          scripts='[]'
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            scripts="$(uv run --no-project --with pyyaml==6.0.3 python \
+              tools/runtime-assertion-gate/gate.py select \
+              --base "origin/${{ github.base_ref }}" --head HEAD)"
+          fi
+          echo "runtime assertions: $scripts"
+          echo "runtime_assertions=$scripts" >> "$GITHUB_OUTPUT"
 
   e2e-ladder-cluster:
     name: E2E parity ladder (cluster rung on kind, fake model)
@@ -1876,7 +1894,7 @@ jobs:
           CURIE_PUBLICATION_KUBE_CONTEXT: kind-curie-e2e
           CURIE_PUBLICATION_KIND_CLUSTER: curie-e2e
           CURIE_PUBLICATION_RUNNER_IMAGE: curie-runner:latest
-        run: bash charts/curie/ci/runtime/publication-job-assertions.sh
+        run: bash tools/runtime-assertion-gate/run.sh charts/curie/ci/runtime/publication-job-assertions.sh
       - name: Langfuse web waits for delayed Postgres without restarting
         env:
           READINESS_NAMESPACE: curie-1853-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1884,7 +1902,8 @@ jobs:
           READINESS_POSTGRES_IMAGE: curie-postgres-readiness:${{ github.sha }}
         run: |
           set -euo pipefail
-          bash charts/curie/ci/runtime/langfuse-postgres-readiness-runtime.sh \
+          bash tools/runtime-assertion-gate/run.sh \
+            charts/curie/ci/runtime/langfuse-postgres-readiness-runtime.sh \
             --namespace "$READINESS_NAMESPACE" \
             --release "$READINESS_RELEASE" \
             --postgres-image "$READINESS_POSTGRES_IMAGE"
@@ -2030,6 +2049,16 @@ jobs:
         run: |
           kubectl delete namespace curie \
             --ignore-not-found --wait=false 2>/dev/null || true
+      # Pass receipts written by tools/runtime-assertion-gate/run.sh. A script
+      # that was skipped, never started, or failed leaves none, and
+      # `E2E required` then fails for any added or changed one (#3391).
+      - name: Upload runtime assertion receipts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-assertion-receipts-${{ github.job }}
+          path: ${{ runner.temp }}/runtime-assertion-receipts
+          if-no-files-found: ignore
 
   # RELEASED CHART UPGRADE REGRESSION (issues #2097 and #2194). This is separate
   # from the fresh install cluster rung because it starts from published charts
@@ -2910,6 +2939,47 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           persist-credentials: false
+      - name: Install uv for the runtime assertion gate
+        if: ${{ !cancelled() }}
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+      # #3391: an added or changed charts/curie/ci/runtime assertion counts only
+      # when a Calico cluster job this verdict needs runs it through the
+      # receipt runner, and that exact blob left a pass receipt. The negative
+      # controls run on every verdict so the gate can never pass vacuously.
+      - name: Runtime assertion gate negative controls
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          uv run --no-project --with pyyaml==6.0.3 python tools/runtime-assertion-gate/gate.py \
+            self-test --workflow .github/workflows/ci.yaml \
+            --registered charts/curie/ci/runtime/publication-job-assertions.sh
+      - name: Changed runtime assertions are registered
+        if: ${{ !cancelled() && needs.changes.outputs.runtime_assertions != '[]' }}
+        env:
+          RUNTIME_ASSERTIONS: ${{ needs.changes.outputs.runtime_assertions }}
+          CLUSTER_SELECTED: ${{ needs.changes.outputs.cluster }}
+        run: |
+          set -euo pipefail
+          if [[ "$CLUSTER_SELECTED" != "true" ]]; then
+            echo "Changed runtime assertions need the cluster tier, which was not selected" >&2
+            exit 1
+          fi
+          uv run --no-project --with pyyaml==6.0.3 python tools/runtime-assertion-gate/gate.py \
+            registration --workflow .github/workflows/ci.yaml --scripts "$RUNTIME_ASSERTIONS"
+      - name: Download runtime assertion receipts
+        if: ${{ !cancelled() && needs.changes.outputs.runtime_assertions != '[]' }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: runtime-assertion-receipts-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/runtime-assertion-receipts
+      - name: Changed runtime assertions executed and passed
+        if: ${{ !cancelled() && needs.changes.outputs.runtime_assertions != '[]' }}
+        env:
+          RUNTIME_ASSERTIONS: ${{ needs.changes.outputs.runtime_assertions }}
+        run: |
+          uv run --no-project --with pyyaml==6.0.3 python tools/runtime-assertion-gate/gate.py \
+            receipts --dir "$RUNNER_TEMP/runtime-assertion-receipts" --scripts "$RUNTIME_ASSERTIONS"
       - name: Assert upgrade matrix wall clock
         if: ${{ !cancelled() && needs.changes.outputs.released_upgrade == 'true' }}
         env:
