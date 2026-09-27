@@ -2015,8 +2015,7 @@ def test_a_selection_refusal_is_logged_so_an_operator_can_find_it(
             class WorkspaceProbe:
                 def select_repository(self, **kwargs: object) -> str:
                     raise WorkspaceSelectionRefused(
-                        "Start the thread by naming one allowed root GitHub "
-                        "repository URL."
+                        "Repository selection refused for this thread."
                     )
 
             h.kernel._workspace = WorkspaceProbe()  # type: ignore[assignment]
@@ -2029,7 +2028,7 @@ def test_a_selection_refusal_is_logged_so_an_operator_can_find_it(
                 "the refusal log must name the agent; an operator searching for "
                 f"a silent bot has only that to search on. Got: {logged!r}"
             )
-            assert "naming one allowed root GitHub repository" in logged, (
+            assert "Repository selection refused" in logged, (
                 f"the refusal log must carry the reason. Got: {logged!r}"
             )
 
