@@ -2455,6 +2455,8 @@ def test_coder_path_reaches_the_publication_boundary_through_real_runner_and_api
                 "turn_active": False,
                 "history_durable": True,
                 "status": "idle-awaiting-input",
+                "turn_epoch": None,
+                "capacity_admission": True,
             }
         ]
         if late_handoff

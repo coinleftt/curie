@@ -3824,6 +3824,19 @@
         "title": "HookRunRef",
         "type": "object"
       },
+      "HookSecretOut": {
+        "properties": {
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret"
+        ],
+        "title": "HookSecretOut",
+        "type": "object"
+      },
       "KillState": {
         "description": "Whether an agent is currently killed (kill switch, L1).",
         "properties": {
@@ -8509,6 +8522,65 @@
         "summary": "Get Cost",
         "tags": [
           "control"
+        ]
+      }
+    },
+    "/agents/{agent_id}/hook-secret": {
+      "get": {
+        "operationId": "get_hook_secret_agents__agent_id__hook_secret_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookSecretOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Hook Secret",
+        "tags": [
+          "agents"
         ]
       }
     },

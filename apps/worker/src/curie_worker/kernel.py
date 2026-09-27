@@ -117,6 +117,12 @@ from .binding import (
     SANDBOX_TOKEN_TTL_SECONDS,
     BindingResolver,
 )
+from .capacity_wait import (
+    CapacityWaitExpired,
+    CapacityWaitRefused,
+    CapacityWaitRequested,
+    current_wait,
+)
 from .config import WorkerConfig
 from .delivery_lease import DeliveryLease, LeaseLostError
 from .hook_runs import HookRunOutcome, HookRunRecorder, HookRunRecorderError
@@ -182,6 +188,10 @@ logger = logging.getLogger(__name__)
 # the runner package.
 _PUBLISH_PROVENANCE = ("permission", PLATFORM_PUBLISH_TOOL_NAME)
 _PUBLICATION_EXPIRES_IN_SECONDS = 24 * 60 * 60
+# Session gates use the same 24 hour deadline as publication (#1938).
+# Omitting expires_in_seconds stores expires_at NULL, and the sweeper
+# only selects rows that have one, so a request nobody resolves never wakes.
+_SESSION_APPROVAL_EXPIRES_IN_SECONDS = 24 * 60 * 60
 _ATTACHMENT_HANDOFF_PROBE_TIMEOUT_S = 5.0
 _ACTIVE_ATTACHMENT_REPLY = (
     "I cannot add a file while the current reply is still running. "
@@ -213,6 +223,15 @@ _UNAVAILABLE_ATTACHMENT_REPLY = (
     "Please send the message again with the file attached."
 )
 _CAPACITY_REPLY = "This agent is at capacity right now. Please try again shortly."
+_CAPACITY_EXPIRED_REPLY = (
+    "Your request could not start before its capacity wait ended. Please send it again."
+)
+_CAPACITY_FAILED_REPLY = "Your request started but could not finish. Please send it again."
+_CAPACITY_UNKNOWN_REPLY = (
+    "Your request may have started, but its result could not be confirmed. "
+    "Please check for a reply before sending it again."
+)
+_CAPACITY_ADMISSION_OBSERVE_S = 20.0
 _REVIEW_EVENT_ID_RE = re.compile(
     r"github-feedback-"
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -1654,6 +1673,87 @@ class Kernel:
                 exc_info=True,
             )
 
+    async def notify_capacity_queued(self, qevent: QueuedTurn) -> ReplyAck:
+        try:
+            return await self._reply_for(
+                qevent,
+                _route_from_handle(qevent),
+                "The agent is busy. Your request is queued and will start when space opens.",
+                terminal=False,
+            )
+        finally:
+            self._minted_refs.pop(qevent.event_id, None)
+
+    async def expire_capacity_wait(
+        self, qevent: QueuedTurn, *, lease: DeliveryLease, cause: str,
+        grant_epoch: str | None,
+    ) -> tuple[bool, str | None]:
+        lease.raise_if_lost()
+        # A wait without a recorded grant never started work. A later message
+        # may now own this thread, so only stop the exact epoch of this wait.
+        if grant_epoch is not None:
+            await self._quiesce_capacity_epoch(
+                _thread_key_for(qevent), grant_epoch
+            )
+        lease.raise_if_lost()
+        route = _route_from_handle(qevent)
+        delivered = False
+        reply_ref: str | None = None
+        try:
+            try:
+                text = (
+                    _CAPACITY_FAILED_REPLY
+                    if cause == "delivery_exhausted"
+                    else _CAPACITY_UNKNOWN_REPLY
+                    if cause == "grant_unknown"
+                    else _CAPACITY_EXPIRED_REPLY
+                )
+                ack = await self._reply_for(qevent, route, text)
+                reply_ref = ack.ref
+                delivered = True
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "capacity wait expiry reply failed for event %s",
+                    qevent.event_id,
+                    exc_info=True,
+                )
+            await self._complete(
+                qevent,
+                route,
+                "escalated",
+                telemetry_outcome="capacity_wait_expired",
+                lease=lease,
+            )
+            return delivered, reply_ref
+        finally:
+            self._minted_refs.pop(qevent.event_id, None)
+            self._terminal_reply_attempted.discard(qevent.event_id)
+
+    async def resolve_capacity_grant(self, qevent: QueuedTurn, epoch: str) -> str:
+        """Attest and stop an uncertain grant before terminal classification."""
+
+        return await self._quiesce_capacity_epoch(_thread_key_for(qevent), epoch)
+
+    async def notify_capacity_expired(
+        self, qevent: QueuedTurn, *, cause: str
+    ) -> ReplyAck:
+        try:
+            text = (
+                _CAPACITY_FAILED_REPLY
+                if cause == "delivery_exhausted"
+                else _CAPACITY_UNKNOWN_REPLY
+                if cause == "grant_unknown"
+                else _CAPACITY_EXPIRED_REPLY
+            )
+            return await self._reply_for(
+                qevent, _route_from_handle(qevent), text
+            )
+        finally:
+            self._minted_refs.pop(qevent.event_id, None)
+            self._terminal_reply_attempted.discard(qevent.event_id)
+
     async def process_event(
         self, qevent: QueuedTurn, *, lease: DeliveryLease | None = None
     ) -> None:
@@ -2380,7 +2480,15 @@ class Kernel:
             # interrupt-and-rehydrate is contemplated) and BEFORE the first
             # attempt.
             if _is_fenced(lease) and lease is not None and lease.generation > 1:
-                await self._preflight_reclaimed_delivery(thread_key, lease)
+                wait_scope = current_wait()
+                if wait_scope is None:
+                    await self._preflight_reclaimed_delivery(thread_key, lease)
+                else:
+                    record = await wait_scope[0].get(wait_scope[1])
+                    if record is not None and record.grant_epoch is not None:
+                        await self._quiesce_capacity_epoch(
+                            thread_key, record.grant_epoch
+                        )
 
             # Retry carry for the inferred repository announcement (#2659); see
             # _WorkspaceInferenceCarry. Local to this delivery, never kernel state,
@@ -2823,6 +2931,50 @@ class Kernel:
         raise ReclaimPreflightUnsafe(
             f"thread {thread_key} still reports (or cannot deny) a live turn after "
             "the reclaim interrupt; refusing to run a replacement beside it"
+        )
+
+    async def _quiesce_capacity_epoch(
+        self, thread_key: str, epoch: str
+    ) -> str:
+        """Stop only this epoch and return its attested admission decision."""
+
+        deadline = time.monotonic() + _RECLAIM_PREFLIGHT_IDLE_TIMEOUT_S
+        handle = await asyncio.to_thread(self._substrate.lookup, thread_key)
+        if handle is None:
+            return "unknown"
+        timeout_sent = False
+        while time.monotonic() < deadline:
+            remaining_s = max(0.0, deadline - time.monotonic())
+            try:
+                status = await self._runner.capacity_status(
+                    handle.base_url, epoch=epoch, token=handle.token or None,
+                    remaining_s=min(1.0, remaining_s),
+                )
+            except Exception as exc:
+                raise ReclaimPreflightUnsafe(
+                    f"capacity runner status unreadable for thread {thread_key}"
+                ) from exc
+            if (
+                status.get("capacity_admission") is not True
+                or "turn_epoch" not in status
+                or status.get("capacity_admission_result")
+                not in {"pending", "granted", "denied", "unknown"}
+            ):
+                raise ReclaimPreflightUnsafe(
+                    f"capacity runner status invalid for thread {thread_key}"
+                )
+            if status["turn_epoch"] != epoch:
+                return str(status["capacity_admission_result"])
+            if not timeout_sent:
+                await self._runner.timeout_turn(
+                    handle.base_url, epoch, token=handle.token or None
+                )
+                timeout_sent = True
+            await asyncio.sleep(
+                min(_RECLAIM_PREFLIGHT_POLL_S, max(0.0, deadline - time.monotonic()))
+            )
+        raise ReclaimPreflightUnsafe(
+            f"capacity runner turn remains live for thread {thread_key}"
         )
 
     async def interrupt_thread(self, thread_key: str, reason: str) -> bool:
@@ -3893,6 +4045,13 @@ class Kernel:
             if pressure_retried:
                 self._record_pressure_outcome("reclaimed")
 
+        async def capacity_response() -> TurnOutcome:
+            release_order()
+            if qevent.source is TurnSource.SLACK and handle is not None:
+                raise CapacityWaitRequested()
+            await self._reply_for(qevent, route, _CAPACITY_REPLY)
+            return TurnOutcome(terminal_ok=True)
+
         try:
             try:
                 if review_candidate:
@@ -4001,15 +4160,11 @@ class Kernel:
                 return TurnOutcome(terminal_ok=False, classification="runner-error")
             if pressure_retried:
                 self._record_pressure_outcome("reclaimed-retry-refused")
-                release_order()
-                await self._reply_for(qevent, route, _CAPACITY_REPLY)
-                return TurnOutcome(terminal_ok=True)
+                return await capacity_response()
 
             if not quota_rejection_is_valid(rejection):
                 self._record_pressure_outcome("refused-invalid-quota")
-                release_order()
-                await self._reply_for(qevent, route, _CAPACITY_REPLY)
-                return TurnOutcome(terminal_ok=True)
+                return await capacity_response()
 
             pressure_started = time.monotonic()
             current_remaining = (
@@ -4020,9 +4175,7 @@ class Kernel:
             required = _PRESSURE_CEILING_S + self._substrate.claim_timeout_seconds
             if current_remaining is None or current_remaining < required:
                 self._record_pressure_outcome("refused-no-budget")
-                release_order()
-                await self._reply_for(qevent, route, _CAPACITY_REPLY)
-                return TurnOutcome(terminal_ok=True)
+                return await capacity_response()
 
             reclaimed = await self._reclaim_idle_route(
                 thread_key,
@@ -4031,18 +4184,14 @@ class Kernel:
             )
             if not reclaimed.reclaimed:
                 self._record_pressure_outcome(reclaimed.outcome)
-                release_order()
-                await self._reply_for(qevent, route, _CAPACITY_REPLY)
-                return TurnOutcome(terminal_ok=True)
+                return await capacity_response()
 
             retry_remaining = current_remaining - (
                 time.monotonic() - pressure_started
             )
             if retry_remaining <= 0:
                 self._record_pressure_outcome("timeout")
-                release_order()
-                await self._reply_for(qevent, route, _CAPACITY_REPLY)
-                return TurnOutcome(terminal_ok=True)
+                return await capacity_response()
             logger.info(
                 "idle route reclamation freed sandbox capacity; retrying event %s",
                 qevent.event_id,
@@ -4168,8 +4317,9 @@ class Kernel:
             release_order()
             if isinstance(exc, UnschedulableClaimError):
                 # No node has room for the pod the quota admitted (#3169). A
-                # factory execution waits for capacity exactly as on a quota
-                # refusal; every other delivery keeps the retry below.
+                # Factory execution and interactive Slack turns wait for
+                # capacity exactly as on a quota refusal. Other deliveries
+                # keep the retry below.
                 parsed_execute = parse_work_item_event_id(qevent.event_id)
                 run = (
                     self._work_item_runs.get(parsed_execute.request_id)
@@ -4191,6 +4341,12 @@ class Kernel:
                             conflict.code,
                         )
                     raise _WorkItemDeferred() from None
+                if qevent.source is TurnSource.SLACK and handle is not None:
+                    logger.warning(
+                        "sandbox unschedulable for interactive event %s; waiting for capacity",
+                        qevent.event_id,
+                    )
+                    raise CapacityWaitRequested() from None
             logger.warning("turn start failed for %s: %r", qevent.event_id, exc)
             return TurnOutcome(terminal_ok=False, classification="runner-error")
         assert routed is not None
@@ -5028,6 +5184,106 @@ class Kernel:
             remaining_s=remaining_s,
             attachment_fresh_only=attachment_fresh_only,
         )
+        wait = current_wait()
+
+        async def check_capacity_before_request() -> float | None:
+            if wait is None:
+                return None
+            wait[3].raise_if_lost()
+            return await wait[0].remaining_before_request(wait[1], wait[2])
+
+        async def admit_capacity_turn(turn: TurnStream) -> None:
+            if wait is None:
+                return
+            epoch = turn.turn_epoch
+            if epoch is None:
+                raise CapacityWaitRefused("capacity runner response carried no epoch")
+
+            async def deny() -> None:
+                try:
+                    await self._runner.admit_turn(
+                        handle.base_url, epoch, allow=False,
+                        token=handle.token or None, remaining_s=2.0,
+                    )
+                except Exception:
+                    logger.warning(
+                        "could not deny unadmitted capacity turn for event %s",
+                        wait[1], exc_info=True,
+                    )
+
+            observe_until = asyncio.get_running_loop().time() + _CAPACITY_ADMISSION_OBSERVE_S
+            while True:
+                wait[3].raise_if_lost()
+                try:
+                    budget_s = await wait[0].remaining_before_request(wait[1], wait[2])
+                except (CapacityWaitExpired, CapacityWaitRefused):
+                    await deny()
+                    raise
+                if asyncio.get_running_loop().time() >= observe_until:
+                    await deny()
+                    raise RunnerError("capacity runner admission was not observed")
+                try:
+                    status = await self._runner.capacity_status(
+                        handle.base_url, token=handle.token or None,
+                        remaining_s=min(1.0, budget_s or 1.0),
+                    )
+                except Exception:
+                    logger.warning(
+                        "capacity runner status unavailable for event %s",
+                        wait[1], exc_info=True,
+                    )
+                else:
+                    if status.get("turn_epoch") == epoch:
+                        break
+                await asyncio.sleep(0.05)
+
+            wait[3].raise_if_lost()
+            state = await wait[0].mark_active(wait[1], wait[2], wait[3], epoch)
+            if state != "active":
+                await deny()
+                if state == "expired":
+                    raise CapacityWaitExpired()
+                raise CapacityWaitRefused("wait generation changed before runner grant")
+            try:
+                wait[3].raise_if_lost()
+                await self._runner.admit_turn(
+                    handle.base_url, epoch, allow=True,
+                    token=handle.token or None,
+                    remaining_s=min(2.0, wait[3].remaining_s()),
+                )
+            except asyncio.CancelledError:
+                await self._quiesce_capacity_epoch(thread_key, epoch)
+                raise
+            except Exception:
+                # The runner can accept the grant and lose only its HTTP reply.
+                # Query the exact epoch before deciding whether work started.
+                try:
+                    status = await self._runner.capacity_status(
+                        handle.base_url, epoch=epoch, token=handle.token or None,
+                        remaining_s=1.0,
+                    )
+                except Exception:
+                    status = {}
+                if (
+                    status.get("capacity_admission") is not True
+                    or status.get("capacity_admission_result") != "granted"
+                ):
+                    try:
+                        result = await self._quiesce_capacity_epoch(thread_key, epoch)
+                    except Exception:
+                        await wait[0].mark_grant_unknown(wait[1], wait[2], epoch)
+                        raise
+                    if result == "granted":
+                        await wait[0].confirm_grant(wait[1], wait[2], wait[3], epoch)
+                    elif result == "unknown":
+                        await wait[0].mark_grant_unknown(wait[1], wait[2], epoch)
+                    raise CapacityWaitRefused(
+                        "capacity runner grant was not confirmed"
+                    ) from None
+            if not await wait[0].confirm_grant(wait[1], wait[2], wait[3], epoch):
+                await self._quiesce_capacity_epoch(thread_key, epoch)
+                raise CapacityWaitRefused("capacity runner grant lost its delivery")
+
         retained_live_route = existing_handle is not None and handle == existing_handle
         # #2659: announce a repository only when this message named it, the
         # server selected that same repository, and the route snapshot taken
@@ -5049,7 +5305,30 @@ class Kernel:
         if inferred is not None:
             workspace_inference.repo = inferred
         self._log_claim_latency(thread_key, claim_started)
-        if source.is_job or verified_review is not None:
+        if wait is not None:
+            # A capacity wake may meet a different live turn on this thread.
+            # Keep its original deadline and retry after that turn finishes;
+            # steering would inject the message before its admission grant.
+            wait_budget_s = await check_capacity_before_request()
+            try:
+                capacity_status = await self._runner.capacity_status(
+                    handle.base_url, token=handle.token or None,
+                    remaining_s=min(1.0, wait_budget_s or 1.0),
+                )
+            except Exception:
+                logger.warning(
+                    "capacity runner status unavailable for event %s",
+                    wait[1], exc_info=True,
+                )
+                raise CapacityWaitRequested() from None
+            # An older runner does not implement the admission gate. Never
+            # submit a capacity event to a runner that would start it directly.
+            if (
+                capacity_status.get("capacity_admission") is not True
+                or capacity_status.get("turn_active") is not False
+            ):
+                raise CapacityWaitRequested()
+        elif source.is_job or verified_review is not None:
             # ADR-0079: a job is an OUTPUT, not a steering input. A cron digest or
             # a webhook must never fold itself into whatever a person is currently
             # saying. A verified review likewise owns a separately reserved
@@ -5195,6 +5474,7 @@ class Kernel:
             remaining_s = run.bound_remaining_s(remaining_s)
         if agent_id is not None:
             self._register_run(agent_id, thread_key)
+        turn: TurnStream | None = None
         try:
             event, remaining_s = await self._bind_publication_context(
                 event,
@@ -5204,12 +5484,35 @@ class Kernel:
                 run=run,
                 remaining_s=remaining_s,
             )
-            turn = await self._runner.start_turn(
-                handle.base_url, event, token=handle.token or None, remaining_s=remaining_s
-            )
-        except BaseException:
+            wait_budget_s = await check_capacity_before_request()
+            if wait is None:
+                turn = await self._runner.start_turn(
+                    handle.base_url, event, token=handle.token or None,
+                    remaining_s=remaining_s,
+                )
+            elif wait_budget_s is None:
+                turn = await self._runner.start_turn(
+                    handle.base_url, event, token=handle.token or None,
+                    remaining_s=remaining_s, capacity_admission=True,
+                )
+            else:
+                async with asyncio.timeout(wait_budget_s):
+                    turn = await self._runner.start_turn(
+                        handle.base_url, event, token=handle.token or None,
+                        remaining_s=remaining_s, capacity_admission=True,
+                    )
+            await admit_capacity_turn(turn)
+        except BaseException as exc:
             self._unregister_run(agent_id, thread_key)
+            if turn is not None:
+                turn.close()
+            if wait is not None and isinstance(exc, TimeoutError):
+                if turn is not None and turn.turn_epoch is not None:
+                    await self._quiesce_capacity_epoch(thread_key, turn.turn_epoch)
+                if await wait[0].check_delivery(wait[1], wait[2]) == "expired":
+                    raise CapacityWaitExpired() from None
             raise
+        assert turn is not None
         _record_route("start")
         _lifecycle_event("runner.turn.started", "start")
         # The inference decided at the claim above is this route's own value.
@@ -5674,6 +5977,35 @@ class Kernel:
         remaining_s: float | None = None,
         attachment_fresh_only: bool = False,
     ) -> SandboxHandle:
+        wait = current_wait()
+        previous_handle: SandboxHandle | None = None
+        if wait is not None:
+            wait_state = await wait[0].check_delivery(wait[1], wait[2])
+            if wait_state == "expired":
+                raise CapacityWaitExpired()
+            if wait_state != "ready":
+                raise CapacityWaitRefused("wait generation changed before claim")
+            previous_handle = await asyncio.to_thread(self._substrate.lookup, thread_key)
+
+        async def validate_wait_claim(handle: SandboxHandle) -> SandboxHandle:
+            if wait is None:
+                return handle
+            state = await wait[0].check_delivery(wait[1], wait[2])
+            if state == "ready":
+                return handle
+            if previous_handle is None:
+                try:
+                    await asyncio.to_thread(self._substrate.release, thread_key)
+                except Exception:
+                    logger.warning(
+                        "could not release an unstarted sandbox for event %s",
+                        wait[1],
+                        exc_info=True,
+                    )
+            if state == "expired":
+                raise CapacityWaitExpired()
+            raise CapacityWaitRefused("wait generation changed after claim")
+
         # A live route is an adopt/steer, not a session start. Preparing before
         # this check would clone on every threaded steer and could even replace
         # the base object while the existing sandbox is still using it. The
@@ -5715,7 +6047,7 @@ class Kernel:
                     thread_key,
                     ttl_seconds=self._route_ttl_seconds,
                 )
-                return existing
+                return await validate_wait_claim(existing)
             handoff_revalidation: Callable[[], None] | None = None
             candidate_validation: Callable[[SandboxHandle], None] | None = None
             if replace_handle is not None:
@@ -5824,12 +6156,12 @@ class Kernel:
                 raise WorkspacePreparationError(
                     "claim", "workspace substrate returned an invalid sandbox handle"
                 )
-            return workspace_claim.handle
+            return await validate_wait_claim(workspace_claim.handle)
         if replace_handle is not None:
             # Turn budget fence (#3071): the caller proved the old runner idle
             # with durable history; hand the route to a runner booted with this
             # delivery's env, keeping the session and history identity.
-            return await asyncio.to_thread(
+            handle = await asyncio.to_thread(
                 self._substrate.handoff,
                 thread_key,
                 expected=replace_handle,
@@ -5837,22 +6169,25 @@ class Kernel:
                 workspace_repo=None,
                 agent_name=agent_name,
             )
+            return await validate_wait_claim(handle)
         try:
-            return await asyncio.to_thread(
+            handle = await asyncio.to_thread(
                 self._substrate.claim,
                 thread_key,
                 env=boot_env,
                 agent_name=agent_name,
                 fresh_only=attachment_fresh_only,
             )
+            return await validate_wait_claim(handle)
         except SuspendedThreadError:
             # Resume with the same bound boot env a fresh claim gets (bundle
             # ref, budget, refs): a suspended pod was deleted (ADR-0003), so
             # the replacement boots from env alone; without this it would come
             # up generic, without the agent's bundle.
-            return await asyncio.to_thread(
+            handle = await asyncio.to_thread(
                 self._substrate.resume, thread_key, env=boot_env, agent_name=agent_name
             )
+            return await validate_wait_claim(handle)
 
     @staticmethod
     def _is_approval_resume(event_id: str) -> bool:
@@ -6264,6 +6599,7 @@ class Kernel:
                         # validation; ValidationError below is the rejection path.
                         gate_kind=cast("GateKind | None", outcome.approval_gate_kind),
                         granted_tool=outcome.approval_granted_tool,
+                        expires_in_seconds=_SESSION_APPROVAL_EXPIRES_IN_SECONDS,
                     )
                 )
         except WorkspaceSelectionRefused as exc:
