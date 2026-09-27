@@ -1204,7 +1204,7 @@ fn evaluate_with_worker_claims(
         (false, false) => skipped(
             "slack",
             "Slack",
-            "no tokens recorded; reachable with `curie cluster message`",
+            "no tokens recorded; reachable with `curie cluster message` and `curie cluster eval`",
         ),
     });
 
@@ -1347,7 +1347,7 @@ pub fn summary(checks: &[Check]) -> String {
     }
     if !has("slack") {
         return "Deployable to the cluster. Slack is not wired; talk to the agent with \
-                `curie cluster message`."
+                `curie cluster message` or `curie cluster eval`."
             .to_string();
     }
     if !has("clone-credential")
@@ -4604,11 +4604,17 @@ esac
             c.detail
         );
         assert!(
+            c.detail.contains("cluster eval"),
+            "point at cluster eval as well: {}",
+            c.detail
+        );
+        assert!(
             c.fix.is_none(),
             "do not send the operator to mint Slack: {c:?}"
         );
         let s = summary(&checks);
         assert!(s.contains("cluster message"), "{s}");
+        assert!(s.contains("cluster eval"), "{s}");
         assert!(s.contains("Slack is not wired"), "{s}");
         assert!(
             !s.contains("no way to be reached"),

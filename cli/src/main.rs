@@ -2793,12 +2793,12 @@ enum ClusterAction {
         /// Helm release name. Default: curie.
         #[arg(long, default_value = "curie")]
         release: String,
-        /// Host the in-cluster worker uses to reach the stub. Omit to auto-detect
-        /// the local IP the kernel would use to reach the cluster.
+        /// Accepted so older command lines still parse. Text-graded cluster eval
+        /// does not use it: replies go through the cluster message relay.
         #[arg(long)]
         listen_host: Option<String>,
-        /// Port the stub binds (0.0.0.0); the worker posts here.
-        /// Default 0 lets the kernel assign an ephemeral port.
+        /// Accepted so older command lines still parse. Text-graded cluster eval
+        /// does not use it: replies go through the cluster message relay.
         #[arg(long, default_value_t = 0)]
         listen_port: u16,
         /// Local port the Valkey port-forward binds.
@@ -2816,12 +2816,13 @@ enum ClusterAction {
             value_parser = message::cluster_valkey_password
         )]
         valkey_password: Option<String>,
-        /// Local port the API port-forward binds (default-channel lookup).
-        /// Default 0 is kernel-assigned, matching `cluster message`.
+        /// Local port the API port-forward binds. The relay poll and a missing
+        /// channel lookup both use it. Default 0 is kernel-assigned, matching
+        /// `cluster message`.
         #[arg(long, default_value_t = 0)]
         api_local_port: u16,
-        /// Platform API key for the default-channel lookup. Omit to read the
-        /// release's own key from its chart Secret.
+        /// Platform API key. It authenticates the relay poll and a missing-channel
+        /// lookup. Omit to read the release's own key from its chart Secret.
         #[arg(long, env = "CURIE_API_KEY", hide_env_values = true, value_parser = message::cluster_api_key)]
         api_key: Option<String>,
         /// Synthetic Slack user id for the enqueued events.
@@ -2845,8 +2846,8 @@ enum ClusterAction {
         concurrency: usize,
         #[command(flatten)]
         sampling: EvalSamplingArgs,
-        /// Print the kubectl commands, stub URL, and enqueue description that a
-        /// real run would produce, and exit without executing anything.
+        /// Print the kubectl port-forwards and relay poll a real run would use,
+        /// and exit without executing anything.
         #[arg(long)]
         dry_run: bool,
     },
