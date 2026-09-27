@@ -455,6 +455,48 @@ def test_console_cookie_resolve_rejects_a_bad_origin(
     _assert_still_pending(approvals_client, auth_headers, approval["id"])
 
 
+def test_console_cookie_resolve_accepts_https_origin_behind_an_http_proxy(
+    approvals_client: TestClient,
+    auth_headers: dict[str, str],
+    clean_db: None,
+) -> None:
+    """The UI proxy's connection is HTTP. The browser Origin stays HTTPS."""
+
+    approval = _explicit_approval(approvals_client, auth_headers, users=[SUBJECT])
+    token = _mint_console_session(approvals_client, auth_headers)
+    resolved = approvals_client.post(
+        f"/approvals/{approval['id']}/resolve",
+        json={"decision": "approved"},
+        headers=_cookie_headers(token, Origin="https://testserver"),
+    )
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["resolved_by"] == SUBJECT
+
+
+def test_forwarded_host_cannot_steer_the_console_origin(
+    approvals_client: TestClient,
+    auth_headers: dict[str, str],
+    clean_db: None,
+) -> None:
+    approval = _explicit_approval(approvals_client, auth_headers, users=[SUBJECT])
+    token = _mint_console_session(approvals_client, auth_headers)
+    denied = approvals_client.post(
+        f"/approvals/{approval['id']}/resolve",
+        json={"decision": "approved"},
+        headers=_cookie_without_matching_origin(
+            token,
+            Origin="https://sibling.example",
+            **{
+                "X-Forwarded-Host": "sibling.example",
+                "X-Forwarded-Proto": "https",
+            },
+        ),
+    )
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"] == "console session origin rejected"
+    _assert_still_pending(approvals_client, auth_headers, approval["id"])
+
+
 def test_console_cookie_resolve_accepts_a_matching_referer_without_origin(
     approvals_client: TestClient,
     auth_headers: dict[str, str],
