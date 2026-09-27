@@ -3264,7 +3264,8 @@ def test_eval_a_live_lease_holds_off_the_delivery_cap() -> None:
         # dead-lettered on the next pass.
         assert (
             await store.release(
-                cfg.eval_stream, cfg.eval_consumer_group, entry_id, owner=lease.owner
+                cfg.eval_stream, cfg.eval_consumer_group, entry_id, owner=lease.owner,
+                resume_event_id=None,
             )
             is True
         )
