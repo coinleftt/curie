@@ -1478,6 +1478,7 @@ def test_dead_lettered_wake_gets_one_terminal_reply_and_owed_completion(
                 assert await lease_store.release(
                     h.config.stream, h.config.consumer_group, wake_id,
                     owner=lease.owner,
+                    resume_event_id=None,
                 )
             await h.async_redis.xclaim(
                 h.config.stream, h.config.consumer_group, h.config.consumer_name, 0,

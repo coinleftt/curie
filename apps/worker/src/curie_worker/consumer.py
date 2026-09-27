@@ -562,6 +562,52 @@ class Consumer(StreamConsumer):
                             )
                             return
 
+                    if self._leases is not None and self._kernel._is_approval_resume(
+                        qevent.event_id
+                    ):
+                        # A second stream entry has its own delivery lease. Only
+                        # one holder of this resume event may enter the kernel
+                        # while the first approved turn is still running. The
+                        # winning entry stays pending until its turn finishes.
+                        # The redundant entry can be acknowledged now: keeping
+                        # it pending would charge repeated reclaim deliveries
+                        # and could dead letter it before the winner finishes.
+                        if not await self._leases.claim_resume(
+                            lease, qevent.event_id, consumer=self._spec.consumer
+                        ):
+                            logger.debug(
+                                "approval resume %s is in flight; acknowledging "
+                                "redundant entry %s",
+                                qevent.event_id,
+                                entry_id,
+                            )
+                            try:
+                                lease.raise_if_lost()
+                                await self._ack(entry_id)
+                            except LeaseLostError:
+                                logger.warning(
+                                    "refusing to ack redundant approval resume entry %s: "
+                                    "this owner lost the delivery lease",
+                                    entry_id,
+                                )
+                                record_metric(
+                                    "curie.queue.settle",
+                                    attributes={**metric_attributes, "outcome": "pending"},
+                                )
+                                return
+                            await self._settle_delivery_best_effort(entry_id)
+                            process_outcome = "success"
+                            span.add_event("queue.message.acked", {"outcome": "ack"})
+                            record_metric(
+                                "curie.queue.process",
+                                attributes={**metric_attributes, "outcome": "success"},
+                            )
+                            record_metric(
+                                "curie.queue.settle",
+                                attributes={**metric_attributes, "outcome": "ack"},
+                            )
+                            return
+
                     age = self._message_age_seconds(qevent.received_at)
                     for name in (
                         "curie.queue.wait.duration",
