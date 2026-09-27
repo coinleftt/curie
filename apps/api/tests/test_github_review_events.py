@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import pytest
@@ -283,6 +283,9 @@ class GitHubTruth:
             "user": {"id": 41, "login": "example-reviewer", "type": "User"},
         }
         self.feedback_status = 200
+        self.issue_comments: list[dict[str, Any]] = []
+        self.comment_posts: list[str] = []
+        self.comment_post_failure: str | None = None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(request.url.path)
@@ -302,6 +305,23 @@ class GitHubTruth:
             return httpx.Response(200, json=self.repo)
         if request.url.path == f"/repos/{REPO}/pulls/17":
             return httpx.Response(200, json=self.pr)
+        if request.url.path == f"/repos/{REPO}/issues/17/comments":
+            if request.method == "GET":
+                return httpx.Response(200, json=self.issue_comments)
+            assert request.method == "POST"
+            body = json.loads(request.content)["body"]
+            self.comment_posts.append(body)
+            if self.comment_post_failure == "before":
+                return httpx.Response(503, json={"message": "Service unavailable"})
+            created = {
+                "id": 900 + len(self.issue_comments),
+                "body": body,
+                "html_url": f"https://github.com/{REPO}/pull/17#issuecomment-900",
+            }
+            self.issue_comments.append(created)
+            if self.comment_post_failure == "after":
+                return httpx.Response(503, json={"message": "Service unavailable"})
+            return httpx.Response(201, json=created)
         if request.url.path == (
             f"/repos/{REPO}/collaborators/example-reviewer/permission"
         ):
@@ -2653,7 +2673,9 @@ def test_review_reservation_is_one_atomic_origin_after_concurrent_replays(review
     assert valkey.xlen(stream) == 1
 
 
-def _write_actual_fenced_review_terminal(client, event_id: str, stream: str) -> None:
+def _write_actual_fenced_review_terminal(
+    client, event_id: str, stream: str, *, outcome: Literal["delivered", "escalated"] = "delivered"
+) -> None:
     from channel_protocol.reply import REPLY_WIRE_VERSION, ReplyTarget, TurnCompleted
     from curie_worker.config import WorkerConfig
     from curie_worker.delivery_lease import DeliveryLeaseStore
@@ -2691,7 +2713,7 @@ def _write_actual_fenced_review_terminal(client, event_id: str, stream: str) -> 
                             reply_ref=None,
                         ),
                         event_id=event_id,
-                        outcome="delivered",
+                        outcome=outcome,
                     ),
                     route=TargetRoute(),
                     created_at=time.time(),
@@ -2708,6 +2730,98 @@ def _write_actual_fenced_review_terminal(client, event_id: str, stream: str) -> 
             )
 
     client.portal.call(settle)
+
+
+def _write_review_history_capacity_terminal(
+    client: TestClient, valkey: Any, event_id: str, stream: str
+) -> None:
+    _write_actual_fenced_review_terminal(client, event_id, stream, outcome="escalated")
+    marker = f"{get_settings().worker_key_prefix}:done:{event_id}"
+    valkey.set(marker, "history_capacity", keepttl=True)
+
+
+def _admit_queued_review(client: TestClient, truth: GitHubTruth, valkey: Any, stream: str) -> None:
+    response = post_review(client, truth)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] in {"feedback_waiting", "feedback_queued"}
+    if response.json()["status"] == "feedback_waiting":
+        review_rows(
+            "UPDATE curie.github_review_feedback SET next_attempt_at=NULL WHERE event_id=:event_id",
+            {"event_id": truth.feedback.event_id},
+        )
+        assert client.portal.call(
+            client.app.state.github_review_reconciler.reconcile_once, truth.feedback.event_id
+        ) == 1
+    assert review_rows("SELECT status FROM curie.github_review_feedback") == [
+        {"status": "queued"}
+    ]
+    assert valkey.xlen(stream) == 1
+
+
+def test_history_capacity_terminal_posts_one_failure_on_the_same_pr(review_stack) -> None:
+    client, truth, valkey, stream = review_stack
+    _admit_queued_review(client, truth, valkey, stream)
+    _write_review_history_capacity_terminal(client, valkey, truth.feedback.event_id, stream)
+
+    reconciler = client.app.state.github_review_reconciler
+    assert client.portal.call(reconciler.reconcile_terminal) == 1
+    assert review_rows("SELECT status,error_code FROM curie.github_review_feedback") == [
+        {"status": "refused", "error_code": "history_capacity_notified"}
+    ]
+    assert len(truth.issue_comments) == 1
+    body = truth.issue_comments[0]["body"]
+    assert truth.feedback.event_id in body
+    assert truth.feedback.url in body
+    assert "history" in body.lower() and "capacity" in body.lower()
+    assert client.portal.call(reconciler.reconcile_terminal) == 0
+    assert len(truth.comment_posts) == 1
+
+
+@pytest.mark.parametrize("terminal", ["ordinary", "unrelated"])
+def test_other_review_terminal_does_not_post_a_capacity_failure(review_stack, terminal) -> None:
+    client, truth, valkey, stream = review_stack
+    _admit_queued_review(client, truth, valkey, stream)
+    event_id = truth.feedback.event_id
+    if terminal == "unrelated":
+        event_id += "-other"
+    _write_actual_fenced_review_terminal(client, event_id, stream)
+    if terminal == "unrelated":
+        marker = f"{get_settings().worker_key_prefix}:done:{event_id}"
+        valkey.set(marker, "history_capacity", keepttl=True)
+
+    expected = 1 if terminal == "ordinary" else 0
+    assert client.portal.call(client.app.state.github_review_reconciler.reconcile_terminal) == expected
+    assert truth.issue_comments == []
+    assert truth.comment_posts == []
+    assert review_rows("SELECT status FROM curie.github_review_feedback") == [
+        {"status": "settled" if terminal == "ordinary" else "queued"}
+    ]
+
+
+@pytest.mark.parametrize("failure", ["before", "after"])
+def test_history_capacity_notice_retries_github_refusal_without_duplicate(
+    review_stack, failure: str
+) -> None:
+    client, truth, valkey, stream = review_stack
+    _admit_queued_review(client, truth, valkey, stream)
+    _write_review_history_capacity_terminal(client, valkey, truth.feedback.event_id, stream)
+    reconciler = client.app.state.github_review_reconciler
+    truth.comment_post_failure = failure
+
+    assert client.portal.call(reconciler.reconcile_terminal) == 1
+    assert review_rows("SELECT status,error_code FROM curie.github_review_feedback") == [
+        {"status": "refused", "error_code": "history_capacity"}
+    ]
+    assert len(truth.comment_posts) == 1
+    assert len(truth.issue_comments) == (0 if failure == "before" else 1)
+
+    truth.comment_post_failure = None
+    client.portal.call(reconciler.reconcile_terminal)
+    assert review_rows("SELECT status,error_code FROM curie.github_review_feedback") == [
+        {"status": "refused", "error_code": "history_capacity_notified"}
+    ]
+    assert len(truth.issue_comments) == 1
+    assert len(truth.comment_posts) == (2 if failure == "before" else 1)
 
 
 @pytest.mark.parametrize("reserve", [False, True])
