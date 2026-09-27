@@ -2647,7 +2647,8 @@ def _passing_quiesce_obs() -> dict[str, Any]:
         "queued_status_while_quiesced": "waiting",
         "path_a_after_renewal_state": "quiescing",
         "path_a_after_renewal_ttl": 28,
-        "path_a_clear_seconds": 35.0,
+        "path_a_clear_seconds": 25.0,
+        "path_a_kill_method": "sigkill",
         "queued_status_after_release": "running",
         "path_b_quiescing_seen": True,
         "path_b_clear_seconds": 3.0,
@@ -2686,6 +2687,9 @@ def test_judge_quiesce_empty_obs_fails_without_raising() -> None:
         ("path_a_clear_seconds", None),
         ("path_a_clear_seconds", 90.0),
         ("queued_status_after_release", "waiting"),
+        ("queued_status_after_release", "failed"),
+        ("path_a_kill_method", "sigkill failed"),
+        ("path_a_helm_forced_stop", True),
         ("path_b_quiescing_seen", False),
         ("path_b_clear_seconds", 25.0),
         ("path_b_clear_seconds", None),
@@ -2733,3 +2737,21 @@ def test_quiesce_refuses_without_a_model_key(
 
     monkeypatch.setattr(fe.Preflight, "run", refuse_run)
     assert fe.main(["run", "--scenario", "quiesce"]) == fe.EXIT_CONFIG
+
+
+def test_poll_until_clear_ignores_an_unknown_marker_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed marker read is not a clear; only claims_enabled ends the wait."""
+
+    reads = iter([{"state": "quiescing"}, {"state": "unknown"}, {"state": "claims_enabled"}])
+    seen: list[str] = []
+
+    def fake_status(_p: Any) -> dict[str, Any]:
+        status = next(reads)
+        seen.append(status["state"])
+        return status
+
+    monkeypatch.setattr(fe, "_claim_status", fake_status)
+    monkeypatch.setattr(fe.time, "sleep", lambda _s: None)
+    cleared = fe._poll_until_clear(object(), fe.time.time(), 60, 0.1)  # type: ignore[arg-type]
+    assert cleared is not None
+    assert seen == ["quiescing", "unknown", "claims_enabled"]

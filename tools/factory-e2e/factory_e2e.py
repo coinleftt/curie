@@ -4351,6 +4351,8 @@ QUIESCE_PAUSED_COMMENT_SECONDS = 300
 QUIESCE_RELEASE_CLAIM_SECONDS = 600
 QUIESCE_CHART_POLL_SECONDS = 5.0
 QUIESCE_CHART_TIMEOUT_SECONDS = 900.0
+# A worker claimed the queued request: it ran, or finished after running.
+QUEUED_CLAIMED_STATUSES = frozenset({"running", "cancellation_requested", "completed"})
 CLAIM_STATES = frozenset({"claims_enabled", "quiescing", "unknown"})
 WORKER_SELECTOR = "app.kubernetes.io/component=worker"
 DRAIN_SELECTOR = "app.kubernetes.io/component=upgrade-drain"
@@ -4423,6 +4425,13 @@ def judge_quiesce(obs: Mapping[str, Any]) -> list[str]:
         failures.append(f"seed request never ran (status {obs.get('seed_status_before')!r})")
     if obs.get("baseline_state") != "claims_enabled":
         failures.append(f"baseline claim state was {obs.get('baseline_state')!r}")
+    if obs.get("path_a_helm_forced_stop"):
+        failures.append("path A: helm did not give up on its own timeout; the driver stopped it")
+    if obs.get("path_a_kill_method") != "sigkill":
+        failures.append(
+            f"path A: the drain process was not SIGKILLed ({obs.get('path_a_kill_method')!r}), "
+            "so a clear could be SIGTERM cleanup rather than the lease lapsing"
+        )
     if obs.get("path_a_quiescing_seen") is not True:
         failures.append("path A: no quiescing state seen while helm waited on the drain")
     code = obs.get("path_a_helm_exit_code")
@@ -4458,8 +4467,11 @@ def judge_quiesce(obs: Mapping[str, Any]) -> list[str]:
     clear_a = _num(obs.get("path_a_clear_seconds"))
     if clear_a is None or clear_a > lease + slack:
         failures.append(f"path A: marker cleared after {clear_a!r}s, bound {lease + slack}s")
-    if obs.get("queued_status_after_release") in (None, "waiting"):
-        failures.append("the queued request never left waiting after the marker cleared")
+    if obs.get("queued_status_after_release") not in QUEUED_CLAIMED_STATUSES:
+        failures.append(
+            "the queued request was not claimed after the marker cleared "
+            f"(status {obs.get('queued_status_after_release')!r})"
+        )
     if obs.get("path_b_quiescing_seen") is not True:
         failures.append("path B: no quiescing state seen")
     clear_b = _num(obs.get("path_b_clear_seconds"))
@@ -4608,10 +4620,57 @@ def _helm_stderr_tail(proc: subprocess.Popen[str]) -> str:
         return ""
 
 
+def _sigkill_drain(p: Preflight, obs: dict[str, Any]) -> str:
+    """SIGKILL the drain container's process through its node's runtime.
+
+    A pod delete, even a forced one, sends SIGTERM first, and the gate clears
+    the marker in that handler. Only a kill it cannot catch proves the lease
+    lapses by itself. Needs ssh with passwordless sudo and crictl on the node
+    (the node name, or CURIE_FACTORY_NODE_SSH_HOST). Returns "sigkill" or why not.
+    """
+
+    pod = _drain_running_pod(p)
+    if pod is None:
+        return "no running drain pod"
+    raw = p.kubectl("-n", p.namespace, "get", pod, "-o", "json", check=False)
+    try:
+        detail = json.loads(raw)
+    except ValueError:
+        return "drain pod unreadable"
+    node = str((detail.get("spec") or {}).get("nodeName") or "")
+    statuses = (detail.get("status") or {}).get("containerStatuses") or []
+    container_id = str((statuses[0] if statuses else {}).get("containerID") or "")
+    container_id = container_id.split("://", 1)[-1]
+    if not node or not re.fullmatch(r"[0-9a-f]{12,64}", container_id):
+        return "drain container id unavailable"
+    host = os.environ.get("CURIE_FACTORY_NODE_SSH_HOST") or node
+    script = (
+        f"pid=$(sudo -n crictl inspect {container_id} | "
+        "python3 -c 'import json,sys;print(json.load(sys.stdin)[\"info\"][\"pid\"])') "
+        '&& sudo -n kill -KILL "$pid" && echo "$pid"'
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", host, script],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return "ssh to the node timed out"
+    if result.returncode != 0 or not result.stdout.strip().isdigit():
+        obs["path_a_kill_error"] = (result.stderr or result.stdout).strip()[-300:]
+        return "sigkill failed"
+    obs["path_a_killed_host_pid"] = int(result.stdout.strip())
+    return "sigkill"
+
+
 def _poll_until_clear(p: Preflight, started: float, cap: float, every: float) -> float | None:
     while time.time() - started < cap:
         status = _claim_status(p)
-        if status is not None and status.get("state") != "quiescing":
+        # Only claims_enabled is a clear; "unknown" is a failed marker read.
+        if status is not None and status.get("state") == "claims_enabled":
             return round(time.time() - started, 1)
         time.sleep(every)
     return None
@@ -4674,6 +4733,7 @@ def quiesce(p: Preflight) -> dict[str, Any]:
                 seen.add(state)
             time.sleep(2)
         if helm_a.poll() is None:
+            obs["path_a_helm_forced_stop"] = True
             _stop_proc(helm_a)
         obs["path_a_helm_exit_code"] = helm_a.returncode
         obs["path_a_helm_elapsed_seconds"] = round(time.time() - started, 1)
@@ -4730,21 +4790,12 @@ def quiesce(p: Preflight) -> dict[str, Any]:
         obs["path_a_after_renewal_state"] = renewed.get("state")
         obs["path_a_after_renewal_ttl"] = renewed.get("ttl_seconds")
 
-        # Clear: delete the Job and force-delete its pod; the marker lapses.
-        p.kubectl("-n", p.namespace, "delete", "job", job_name, "--wait=false", check=False)
-        p.kubectl(
-            "-n",
-            p.namespace,
-            "delete",
-            "pod",
-            "-l",
-            DRAIN_SELECTOR,
-            "--grace-period=0",
-            "--force",
-            "--wait=false",
-            check=False,
-        )
+        # Clear: SIGKILL the drain process from its node, so no SIGTERM handler
+        # can clear the marker, then delete the Job. The marker must lapse
+        # within one lease on its own.
+        obs["path_a_kill_method"] = _sigkill_drain(p, obs)
         deleted = time.time()
+        p.kubectl("-n", p.namespace, "delete", "job", job_name, "--wait=false", check=False)
         obs["path_a_clear_seconds"] = _poll_until_clear(
             p, deleted, lease + QUIESCE_CLEAR_SLACK_SECONDS + 30, 1.0
         )
