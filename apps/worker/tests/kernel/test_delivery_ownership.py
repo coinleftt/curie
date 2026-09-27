@@ -185,6 +185,81 @@ def test_a_second_replica_is_refused_while_the_first_holds_a_live_lease(
     asyncio.run(go())
 
 
+def test_distinct_approval_resume_deliveries_run_once_while_first_turn_is_live(
+    make_harness,
+) -> None:
+    """#2832: a resume event id fences separate stream entries, not just one PEL row.
+
+    The API can enqueue the same deterministic resume twice. Each entry has its
+    own delivery lease, so fencing only by stream id lets the second delivery
+    steer the live approved turn. A completed duplicate must then be consumed
+    through the existing done marker without starting or steering another turn.
+    """
+
+    async def go() -> None:
+        async with make_harness(**_LEASE_KNOBS) as h:
+            store = DeliveryLeaseStore(h.async_redis, h.config)
+            cfg_a = h.config.model_copy(update={"consumer_name": "resume-worker-a"})
+            cfg_b = h.config.model_copy(update={"consumer_name": "resume-worker-b"})
+            consumer_a = Consumer(
+                redis=h.async_redis, kernel=h.kernel, config=cfg_a, leases=store
+            )
+            consumer_b = Consumer(
+                redis=h.async_redis, kernel=h.kernel, config=cfg_b, leases=store
+            )
+            await consumer_a.ensure_group()
+
+            hold = asyncio.Event()
+            h.runner.hold = hold
+            h.runner.default_script = [TextDelta(text="working")]
+            h.runner.tail = [Final(text="approved work finished", status=DONE)]
+            event_id = f"approval-{uuid.uuid4()}-resolved"
+            resume = _qevent(
+                "continue approved work", thread="resume-2832", event_id=event_id
+            )
+            first_id = await h.async_redis.xadd(
+                h.config.stream, to_stream_fields(resume)
+            )
+            second_id = await h.async_redis.xadd(
+                h.config.stream, to_stream_fields(resume)
+            )
+            assert first_id != second_id
+
+            read_first_id, first_fields = await _read_one(h, "resume-worker-a")
+            assert read_first_id == first_id
+            await consumer_a._dispatch(first_id, first_fields)
+            await _wait_until(lambda: h.runner.turn_active)
+            read_second_id, second_fields = await _read_one(h, "resume-worker-b")
+            assert read_second_id == second_id
+
+            try:
+                await consumer_b._dispatch(second_id, second_fields)
+                await _settle(consumer_b)
+                assert h.runner.opened == [resume.text]
+                assert h.runner.steers == [], (
+                    "the duplicate resume steered into the live approved turn"
+                )
+                assert second_id in await _pending_rows(h), (
+                    "the refused duplicate was acked before the first turn completed"
+                )
+            finally:
+                hold.set()
+                await _settle(consumer_a)
+
+            assert first_id not in await _pending_rows(h)
+            assert await h.async_redis.exists(h.config.done_key(event_id))
+
+            await consumer_b._dispatch(second_id, second_fields)
+            await _settle(consumer_b)
+            assert second_id not in await _pending_rows(h), (
+                "the completed duplicate was not absorbed on redelivery"
+            )
+            assert h.runner.opened == [resume.text]
+            assert h.runner.steers == []
+
+    asyncio.run(go())
+
+
 # --- R2: heartbeat renewal ----------------------------------------------------
 
 
