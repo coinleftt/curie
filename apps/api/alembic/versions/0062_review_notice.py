@@ -1,7 +1,7 @@
 """Store a private review capacity notice marker and bounded scan cursor.
 
-Revision ID: 0061
-Revises: 0060
+Revision ID: 0062
+Revises: 0061
 Create Date: 2026-09-27
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0061"
-down_revision: str | None = "0060"
+revision: str = "0062"
+down_revision: str | None = "0061"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
