@@ -32,6 +32,7 @@ _TURN_OUTCOMES: Final = [
     # value crashes terminal completion after the turn has already settled
     # and leaves the stream entry pending.
     "deadline_halted",
+    "capacity_wait_expired",
 ]
 
 
@@ -78,7 +79,12 @@ _HISTORY_PERSISTENCE_FAILURE_ATTRIBUTES = {
 _QUEUE_ATTRIBUTES = {
     "service.name": ["curie-api", "curie-dispatcher", "curie-worker"],
     "source": ["api", "dispatcher", "worker", "local", "eval"],
-    "outcome": ["success", "failure", "pending", "ack", "retry", "dead-letter"],
+    "outcome": ["success", "failure", "pending", "ack", "retry", "dead-letter", "queued"],
+}
+_CAPACITY_WAIT_COUNT_ATTRIBUTES = {
+    "service.name": ["curie-worker"],
+    "source": ["worker"],
+    "state": ["waiting", "active", "expired"],
 }
 _QUEUE_RETRY_ATTRIBUTES = {
     "service.name": ["curie-worker"],
@@ -143,7 +149,7 @@ _SANDBOX_INVENTORY_ATTRIBUTES = {
 }
 _RUNNER_RPC_ATTRIBUTES = {
     "service.name": ["curie-worker"],
-    "operation": ["event", "steer", "interrupt", "reset", "status", "timeout"],
+    "operation": ["event", "steer", "interrupt", "reset", "status", "timeout", "turn-admit"],
     "role": ["client"],
     "outcome": ["success", "failure", "conflict", "timeout"],
 }
@@ -456,6 +462,13 @@ _METRICS: dict[str, dict[str, Any]] = {
         "Age of the oldest owed completion still retrying delivery.",
         False,
         _COMPLETION_OUTBOX_AGE_ATTRIBUTES,
+    ),
+    "curie.capacity.wait": _definition(
+        "gauge",
+        "{turn}",
+        "Interactive turns by persisted capacity wait state.",
+        False,
+        _CAPACITY_WAIT_COUNT_ATTRIBUTES,
     ),
     "curie.reply.delivery": _definition(
         "counter", "{reply}", "Reply delivery outcomes.", True, _REPLY_ATTRIBUTES

@@ -101,6 +101,9 @@ _NON_BOOT_ALLOWLIST: frozenset[str] = frozenset(
         "CURIE_ATTACHMENT_REFERENCE_TTL_SECONDS",
         "CURIE_ATTACHMENT_RETENTION_TTL_SECONDS",
         "CURIE_BOOTING_TEXT",
+        # Read by the worker capacity wait store, which bounds how long a
+        # queued chat turn may wait. It is never sent to a sandbox.
+        "CURIE_CAPACITY_WAIT_BUDGET_S",
         "CURIE_CONSUMER_GROUP",
         "CURIE_CONSUMER_CAPABILITY_TTL_MS",
         "CURIE_CONSUMER_HEARTBEAT_TTL_MS",
