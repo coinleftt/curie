@@ -358,10 +358,21 @@ fn unique_repository_identity(node: &Value, repo: &str) -> Option<String> {
     identities.next().is_none().then_some(identity)
 }
 
+/// Kubelet's nodeStatusMaxImages default. A Node.status.images list this long
+/// may have dropped any smaller image, so an absent name is unknown there.
+/// https://kubernetes.io/docs/reference/config-api/kubelet-config.v1beta1/
+const NODE_STATUS_MAX_IMAGES: usize = 50;
+
+fn inventory_truncated(node: &Value) -> bool {
+    array(node, "/status/images").len() >= NODE_STATUS_MAX_IMAGES
+}
+
 /// Bind a tagged request or kubelet alias to the running imageID digest.
 /// Prefer a unique digest on matching inventory entries; if those entries are
 /// digest-less, a unique same-repository digest on the node that equals the
-/// running identity. A missing name is unbound. Do not infer across repositories.
+/// running identity. A missing name is unbound unless the inventory is at the
+/// kubelet cap, where the running digest in the same repository binds it (#3352).
+/// Do not infer across repositories.
 /// https://kubernetes.io/docs/reference/kubernetes-api/cluster-resources/node-v1/#NodeStatus
 fn resolve_reference_identity(node: &Value, reference: &str, running: &str) -> Option<String> {
     match matching_inventory_identities(node, reference) {
@@ -371,7 +382,8 @@ fn resolve_reference_identity(node: &Value, reference: &str, running: &str) -> O
             (identity == running).then_some(identity)
         }
         Some(_) => unique_inventory_identity(node, reference),
-        None => None,
+        None => (inventory_truncated(node) && repository(running) == repository(reference))
+            .then(|| running.to_owned()),
     }
 }
 
