@@ -999,7 +999,11 @@ enum SreBotAction {
         #[arg(long, value_name = "USER_IDS", required = true)]
         approvers: Vec<String>,
         /// Install the upgrade path: the self-upgrade connector, the platform
-        /// upgrade Job, and the two identities behind them.
+        /// upgrade Job, and the two identities behind them. Applies
+        /// upgrade-role.yaml, platform-upgrade-role.yaml, and the rendered
+        /// platform-upgrade ConfigMap and suspended CronJob. Arms only
+        /// upgrade_platform: no self-upgrade CronJob is applied, so
+        /// upgrade_self stays unarmed.
         ///
         /// CREATES A NAMESPACE-ADMIN-EQUIVALENT IDENTITY for the Job that runs
         /// `helm upgrade`. Read examples/sre-bot/manifests/platform-upgrade-role.yaml
