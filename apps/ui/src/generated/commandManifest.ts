@@ -6041,7 +6041,7 @@ export const commandManifest = {
                 },
                 {
                   "global": false,
-                  "help": "Install the upgrade path: the self-upgrade connector, the platform upgrade Job, and the two identities behind them",
+                  "help": "Install the upgrade path: the self-upgrade connector, the platform upgrade Job, and the two identities behind them. Applies upgrade-role.yaml, platform-upgrade-role.yaml, and the rendered platform-upgrade ConfigMap and suspended CronJob. Arms only upgrade_platform: no self-upgrade CronJob is applied, so upgrade_self stays unarmed",
                   "id": "platform_upgrade",
                   "long": "platform-upgrade",
                   "positional": false,

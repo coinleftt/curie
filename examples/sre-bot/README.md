@@ -104,7 +104,9 @@ for its approval route.
 
 Inspect the mutation plan first with `--dry-run`. Add `--platform-upgrade` only
 after reading `manifests/platform-upgrade-role.yaml`; it creates a separate,
-purpose-built upgrade path with much wider authority.
+purpose-built upgrade path with much wider authority. It arms only
+`upgrade_platform`; it does not apply `self-upgrade/cronjob.yaml`, so
+`upgrade_self` stays unarmed on installer-built deployments.
 
 For a manual install, apply `manifests/kubernetes-access.yaml`, assemble a
 kubeconfig for `sre-bot-kubernetes`, store it as the connector secret

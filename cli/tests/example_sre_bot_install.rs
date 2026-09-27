@@ -1582,7 +1582,7 @@ fn publication_gate_survives_both_embedded_installer_modes_with_operator_approve
         assert_eq!(
             gates
                 .iter()
-                .any(|gate| gate["gate"] == "mcp__self-upgrade__upgrade_self"),
+                .any(|gate| gate["gate"] == "mcp__self-upgrade__upgrade_platform"),
             platform_upgrade,
             "the two iterations must exercise different self upgrade modes: {gates:?}"
         );
