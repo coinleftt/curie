@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 import redis.exceptions
-from aci_protocol import Final, QueuedTurn, ReplyHandle, SessionStatus, TextDelta
+from aci_protocol import Final, QueuedTurn, ReplyHandle, SessionStatus, TextDelta, TurnSource
 from curie_dispatcher.queue import to_stream_fields
 from curie_test_support.valkey import VALKEY_HOST, VALKEY_PORT, VALKEY_PW
 from curie_worker import consumer as consumer_module
@@ -127,7 +127,13 @@ class _RenewalProbeStore:
         await self._delegate.release_reclaim(**kwargs)
 
 
-def _qevent(text: str, *, thread: str = "th-1", event_id: str | None = None) -> QueuedTurn:
+def _qevent(
+    text: str,
+    *,
+    thread: str = "th-1",
+    event_id: str | None = None,
+    source: TurnSource = TurnSource.SLACK,
+) -> QueuedTurn:
     return QueuedTurn(
         event_id=event_id or uuid.uuid4().hex,
         conversation_id=thread,
@@ -135,6 +141,7 @@ def _qevent(text: str, *, thread: str = "th-1", event_id: str | None = None) -> 
         text=text,
         reply_handle=ReplyHandle(kind="slack", channel="C1", placeholder="p-1"),
         received_at="2026-07-05T00:00:00+00:00",
+        source=source,
     )
 
 
@@ -187,6 +194,83 @@ def test_consumes_stream_entry_end_to_end_and_acks(make_harness) -> None:
             assert h.runner.opened == ["hello"]
             summary = await h.async_redis.xpending(h.config.stream, h.config.consumer_group)
             assert summary["pending"] == 0  # the entry was acked
+
+    asyncio.run(go())
+
+
+def test_interactive_capacity_wait_acks_without_completing_the_turn(make_harness) -> None:
+    async def go() -> None:
+        async with make_harness(
+            slack_no_edit_streaming=True,
+            claim_timeout_seconds=0.05,
+        ) as h:
+            h.fake_k8s.quota_rejection = QuotaRejection(
+                quota_name="curie-sandbox-quota",
+                requested={"pods": "1"},
+                used={"pods": "2"},
+                hard={"pods": "2"},
+            )
+            consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+            await consumer.ensure_group()
+            event = _qevent("hello", thread="waiting-thread", event_id="waiting-turn")
+            await h.async_redis.xadd(h.config.stream, to_stream_fields(event))
+
+            task = asyncio.create_task(consumer.run())
+            try:
+                await _wait_until(lambda: bool(h.sink.updates))
+                assert "queued" in h.sink.updates[-1][2].lower()
+                assert h.sink.updates[-1][:2] == ("C1", "p-1")
+                assert h.runner.opened == []
+                assert not await h.async_redis.exists(h.config.done_key(event.event_id))
+                pending = await h.async_redis.xpending(
+                    h.config.stream, h.config.consumer_group
+                )
+                assert pending["pending"] == 0
+            finally:
+                consumer.request_stop()
+                await task
+
+    asyncio.run(go())
+
+
+def test_slack_reply_handle_does_not_make_a_webhook_turn_interactive(
+    make_harness,
+) -> None:
+    async def go() -> None:
+        async with make_harness(
+            slack_no_edit_streaming=True,
+            claim_timeout_seconds=0.05,
+        ) as h:
+            h.fake_k8s.quota_rejection = QuotaRejection(
+                quota_name="curie-sandbox-quota",
+                requested={"pods": "1"},
+                used={"pods": "2"},
+                hard={"pods": "2"},
+            )
+            consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+            await consumer.ensure_group()
+            event = _qevent(
+                "job output",
+                thread="webhook-thread",
+                event_id="webhook-capacity",
+                source=TurnSource.WEBHOOK,
+            )
+            await h.async_redis.xadd(h.config.stream, to_stream_fields(event))
+
+            task = asyncio.create_task(consumer.run())
+            try:
+                await _wait_key(h.async_redis, h.config.done_key(event.event_id))
+                assert h.sink.updates == [
+                    (
+                        "C1",
+                        "p-1",
+                        "This agent is at capacity right now. Please try again shortly.",
+                    )
+                ]
+                assert h.runner.opened == []
+            finally:
+                consumer.request_stop()
+                await task
 
     asyncio.run(go())
 
