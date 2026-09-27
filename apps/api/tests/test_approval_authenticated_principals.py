@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -471,6 +472,39 @@ def test_console_cookie_resolve_accepts_https_origin_behind_an_http_proxy(
     )
     assert resolved.status_code == 200, resolved.text
     assert resolved.json()["resolved_by"] == SUBJECT
+
+
+def test_console_cookie_resolve_keeps_a_nondefault_port(
+    approvals_client: TestClient,
+    auth_headers: dict[str, str],
+    clean_db: None,
+) -> None:
+    """The browser Origin includes :28080. The UI proxy must forward that host."""
+
+    approval = _explicit_approval(approvals_client, auth_headers, users=[SUBJECT])
+    token = _mint_console_session(approvals_client, auth_headers)
+    with TestClient(approvals_client.app, base_url="http://localhost:28080") as client:
+        denied = client.post(
+            f"/approvals/{approval['id']}/resolve",
+            json={"decision": "approved"},
+            headers=_cookie_headers(token, Origin="http://localhost:9999"),
+        )
+        assert denied.status_code == 403, denied.text
+        assert denied.json()["detail"] == "console session origin rejected"
+        resolved = client.post(
+            f"/approvals/{approval['id']}/resolve",
+            json={"decision": "approved"},
+            headers=_cookie_headers(token, Origin="http://localhost:28080"),
+        )
+        assert resolved.status_code == 200, resolved.text
+
+
+def test_ui_proxy_forwards_the_browser_host_header() -> None:
+    dockerfile = (
+        Path(__file__).resolve().parents[3] / "apps" / "ui" / "Dockerfile"
+    ).read_text(encoding="utf-8")
+    assert "proxy_set_header Host $http_host;" in dockerfile
+    assert "proxy_set_header Host $host;" not in dockerfile
 
 
 def test_forwarded_host_cannot_steer_the_console_origin(
