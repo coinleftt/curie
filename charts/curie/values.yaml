@@ -475,6 +475,12 @@ valkey:
   persistence:
     enabled: true
     size: 1Gi
+  # Internal memory ceiling (#3350), passed as `--maxmemory`. Empty derives 75%
+  # of resources.limits.memory so a full broker refuses writes with an OOM error
+  # instead of being OOMKilled, leaving headroom for the BGSAVE fork. Set a
+  # Valkey size ("200mb", bytes) to override; with no memory limit and no value,
+  # no ceiling is set. The policy is always noeviction (Langfuse BullMQ needs it).
+  maxmemory: ""
   resources:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { cpu: 250m, memory: 256Mi }
