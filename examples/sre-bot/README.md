@@ -203,7 +203,7 @@ default API port. The Slack channel is the agent's bound reply channel.
 set -euo pipefail
 umask 077
 : "${KUBE_CONTEXT:?Set the Kubernetes context for this installation}"
-: "${SLACK_CHANNEL:?Set the agent's bound Slack channel ID}"
+: "${SLACK_CHANNEL:?Set the bound Slack channel ID}"
 OBS_NAMESPACE=${OBS_NAMESPACE:-observability}
 CURIE_NAMESPACE=${CURIE_NAMESPACE:-curie}
 CURIE_RELEASE=${CURIE_RELEASE:-curie}
@@ -233,10 +233,10 @@ kubectl --context "$KUBE_CONTEXT" -n "$OBS_NAMESPACE" create secret generic aler
   --from-file="$private_dir/CURIE_HOOK_SECRET" \
   --from-file="$private_dir/CURIE_HOOK_URL" \
   --dry-run=client -o yaml |
-  kubectl --context "$KUBE_CONTEXT" -n "$OBS_NAMESPACE" apply -f -
+  kubectl --context "$KUBE_CONTEXT" -n "$OBS_NAMESPACE" apply --server-side -f -
 kubectl --context "$KUBE_CONTEXT" -n "$OBS_NAMESPACE" create secret generic alertmanager-signer-token \
   --from-file="$private_dir/token" --dry-run=client -o yaml |
-  kubectl --context "$KUBE_CONTEXT" -n "$OBS_NAMESPACE" apply -f -
+  kubectl --context "$KUBE_CONTEXT" -n "$OBS_NAMESPACE" apply --server-side -f -
 kubectl --context "$KUBE_CONTEXT" -n "$OBS_NAMESPACE" create configmap alert-signer-code \
   --from-file=server.py=examples/sre-bot/observability/alert-signer/server.py \
   --dry-run=client -o yaml |
@@ -333,18 +333,41 @@ does not alarm, so after the upgrade confirm the external service shows a first
 post. Only then does a stop in the posts raise its alarm.
 
 The heartbeat cannot see the last leg, from Alertmanager to the bot. Check that
-with one synthetic alert posted to Alertmanager's API:
+with one synthetic alert posted to Alertmanager's API. Use a disposable workload
+that has an entry in `source_bindings.alertmanager.map`, since a mapped alert
+can start a coding investigation:
 
 ```bash
-kubectl -n observability exec prometheus-alertmanager-0 -- \
-  amtool alert add CurieSyntheticDeliveryCheck \
+(
+set -euo pipefail
+: "${KUBE_CONTEXT:?Set the Kubernetes context for this installation}"
+: "${CURIE_WORKLOAD:?Set the configured curie_workload label}"
+OBS_NAMESPACE=${OBS_NAMESPACE:-observability}
+probe_name="CurieSyntheticDeliveryCheck$(date -u +%Y%m%d%H%M%S)"
+kubectl --context "$KUBE_CONTEXT" -n "$OBS_NAMESPACE" exec prometheus-alertmanager-0 -- \
+  amtool alert add "$probe_name" "curie_workload=$CURIE_WORKLOAD" \
   --annotation=summary='Synthetic delivery check' \
   --alertmanager.url=http://localhost:9093
+alerts_path="/api/v1/namespaces/$OBS_NAMESPACE/services/http:prometheus-alertmanager:9093/proxy/api/v2/alerts"
+for attempt in $(seq 1 15); do
+  if kubectl --context "$KUBE_CONTEXT" get --raw "$alerts_path" |
+    jq -e --arg name "$probe_name" --arg workload "$CURIE_WORKLOAD" \
+      'any(.[]; .labels.alertname == $name and
+        .labels.curie_workload == $workload and
+        any(.receivers[]?; .name == "curie-sre"))' > /dev/null; then
+    printf 'Alertmanager routed %s to curie-sre\n' "$probe_name"
+    exit 0
+  fi
+  sleep 2
+done
+printf 'Alertmanager did not route %s to curie-sre\n' "$probe_name" >&2
+exit 1
+)
 ```
 
-Then wait for the bot's reply in the bound channel (`C0EXAMPLE1` above). The
-alert names no workload, so the hook runs the investigation with coding
-stopped and the reply should say so. Because `curie-sre` sets `send_resolved`,
+The API check proves Alertmanager accepted the alert and selected `curie-sre`.
+It does not prove the webhook arrived at Curie. Confirm the bot's investigation
+appears in the bound Slack channel. Because `curie-sre` sets `send_resolved`,
 expect a second, resolved delivery about five minutes later. A missing reply
 means the path is broken somewhere between Alertmanager and the bot.
 

@@ -46,21 +46,23 @@ def test_signer_receives_hook_configuration_from_operator_secret() -> None:
 
 
 def test_signer_deployment_has_a_runnable_server() -> None:
-    resources = _resources()
-    deployment = resources["Deployment"]
-    container, = deployment["spec"]["template"]["spec"]["containers"]
+    deployment = _resources()["Deployment"]
+    pod = deployment["spec"]["template"]["spec"]
+    (container,) = pod["containers"]
     assert container.get("image"), "the signer needs a provisionable runtime image"
     command = [*container.get("command", []), *container.get("args", [])]
-    assert any("server.py" in part for part in command), command
-    if "ConfigMap" in resources:
-        config = resources["ConfigMap"]
-        assert "server.py" in config.get("data", {})
-        volumes = deployment["spec"]["template"]["spec"].get("volumes") or []
-        assert any(
-            (volume.get("configMap") or {}).get("name") == config["metadata"]["name"]
-            for volume in volumes
-        )
-        assert container.get("volumeMounts")
+    assert "/app/server.py" in command
+    mounts = [
+        mount
+        for mount in container.get("volumeMounts") or []
+        if mount.get("mountPath") == "/app"
+    ]
+    assert len(mounts) == 1
+    assert mounts[0].get("readOnly") is True
+    volumes = {volume["name"]: volume for volume in pod.get("volumes") or []}
+    assert (volumes[mounts[0]["name"]].get("configMap") or {}).get("name") == (
+        "alert-signer-code"
+    )
 
 
 def test_default_observability_does_not_enable_the_signer() -> None:
