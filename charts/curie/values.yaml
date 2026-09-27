@@ -1983,6 +1983,10 @@ worker:
   # Disable it for a release where an interrupted turn is acceptable (a dev
   # cluster, a fake-model install). The chart's behavior without it is exactly
   # what it was before the gate existed.
+  #
+  # A second pre-upgrade hook refuses the upgrade unless the drain recorded
+  # success for this revision, so deleting the drain Job mid-wait does not
+  # roll workers.
   upgradeDrain:
     enabled: true
     # How long to wait for the in-flight deliveries before refusing. A FLOOR,
