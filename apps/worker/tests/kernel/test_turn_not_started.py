@@ -311,7 +311,7 @@ def test_a_turn_that_already_settled_keeps_its_answer(make_harness) -> None:
                 await h.kernel._reply_for(
                     qevent, _route_from_handle(qevent), "the answer", terminal=False
                 )
-                await h.kernel._markers.mark_done(qevent.event_id)
+                await h.kernel._markers.mark_done(qevent.event_id, marker_value="1")
                 raise ConnectionError("the settle applied and lost its response")
 
             h.kernel.process_event = settled_then_raised  # type: ignore[method-assign,assignment]
