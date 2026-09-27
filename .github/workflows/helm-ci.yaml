@@ -206,6 +206,11 @@ jobs:
           set -euo pipefail
           bash charts/curie/ci/valkey-tls-assertions.sh
 
+      - name: helm render assertions (valkey AOF)
+        run: |
+          set -euo pipefail
+          bash charts/curie/ci/valkey-aof-assertions.sh
+
       # Prove every Postgres DSN carries a TLS parameter when asked, and that
       # the signal reaches both driver families rather than one of them (#2431).
       # SQLAlchemy/asyncpg needs ?ssl=require; Prisma needs ?sslmode=no-verify;
