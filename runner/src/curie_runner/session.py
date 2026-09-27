@@ -766,7 +766,6 @@ class SessionRunner:
 
         async with self._turn_lock:
             start = time.monotonic()
-            logger.info("turn start session=%s user=%s", self._session_id, event.user)
             self._interrupt_requested = False
             self._timeout_requested = False
             self._timeout_interrupt_settled = None
@@ -830,6 +829,7 @@ class SessionRunner:
                     approval_decision=self._approval_decision,
                     parent=parent,
                 ) as gen:
+                    logger.info("turn start session=%s user=%s", self._session_id, event.user)
                     try:
                         if admission_required:
                             gate = self._admission_gate
