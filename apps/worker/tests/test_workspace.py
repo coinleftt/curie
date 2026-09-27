@@ -16,9 +16,11 @@ from __future__ import annotations
 import gzip
 import hashlib
 import importlib
+import inspect
 import io
 import json
 import os
+import re
 import stat
 import tarfile
 import threading
@@ -765,14 +767,6 @@ def test_workspace_coordinator_propagates_absent_repository_selection(
     ("code", "expected_detail"),
     [
         (
-            "workspace.deployment_disabled",
-            "This deployment does not enable repository workspaces.",
-        ),
-        (
-            "workspace.repository_required",
-            "Start the thread by naming one allowed root GitHub repository URL.",
-        ),
-        (
             "workspace.selection_conflict",
             "This thread is already bound to a different repository.",
         ),
@@ -807,6 +801,68 @@ def test_internal_workspace_selection_409_maps_machine_code_not_detail_prose(
         client.select(DEPLOYMENT_ID, "1700000000.000100", "U0REQUEST1", None)
 
     assert excinfo.value.public_detail == expected_detail
+
+
+def test_selection_refusal_codes_match_the_apis_emissions(workspace: Any) -> None:
+    """#2684: the worker must map exactly the codes the API emits.
+
+    The two sides cannot share a constant: the worker does not import the API
+    package at runtime, so this seam is pinned here instead. A code in the
+    worker map that the API never emits is unreachable dead prose, and a code
+    the API emits that the worker does not map degrades into an
+    ``invalid selection refusal response`` preparation fault instead of a
+    refusal the user can read, so the two sets must stay equal.
+    """
+
+    router = importlib.import_module("curie_api.routers.workspaces")
+    quoted_codes = re.findall(
+        r'(["\'])(workspace\.[a-z_]+)\1', inspect.getsource(router)
+    )
+    emitted = {code for _quote, code in quoted_codes}
+    understood = set(workspace._SELECTION_REFUSAL_MESSAGES)
+
+    assert emitted == understood, (
+        "worker workspace-refusal codes and the codes the API selection "
+        "router emits have drifted; update both sides of the seam together"
+    )
+
+
+def test_internal_workspace_selection_409_unmapped_code_is_invalid_response(
+    workspace: Any,
+) -> None:
+    """A code the worker does not map is a protocol fault, not refusal prose.
+
+    ``workspace.repository_required`` was one of the unreachable mappings
+    removed in #2684; reusing it here pins that the removed code now fails
+    closed through the invalid-response branch instead of silently rendering
+    prose the API never chose.
+    """
+
+    def transport(**_request: Any) -> Any:
+        return SimpleNamespace(
+            status=409,
+            headers={},
+            body=json.dumps(
+                {
+                    "detail": {
+                        "code": "workspace.repository_required",
+                        "message": "wording intentionally shares no legacy match text",
+                    }
+                }
+            ).encode(),
+        )
+
+    client = workspace.WorkspaceCredentialClient(
+        api_url="https://api.example.com",
+        worker_token=WORKER_AUTH,
+        transport=transport,
+    )
+
+    with pytest.raises(workspace.WorkspacePreparationError) as excinfo:
+        client.select(DEPLOYMENT_ID, "1700000000.000100", "U0REQUEST1", None)
+
+    assert "invalid selection refusal response" in str(excinfo.value)
+    assert not isinstance(excinfo.value, workspace.WorkspaceSelectionRefused)
 
 
 def test_workspace_preparer_does_not_chmod_preexisting_mount_root(
