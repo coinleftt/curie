@@ -178,6 +178,7 @@ class Consumer(StreamConsumer):
             redis,
             leases=leases,
             on_lease_lost=self._interrupt_on_lease_lost,
+            on_entry_vanished=self._notice_vanished_entry,
             drain=drain,
             liveness_store=ConsumerLivenessStore(redis),
         )
@@ -831,6 +832,19 @@ class Consumer(StreamConsumer):
             logger.exception(
                 "could not interrupt the runner for entry %s after its delivery "
                 "lease was lost; the fence still refuses every terminal write",
+                entry_id,
+            )
+
+    async def _notice_vanished_entry(self, entry_id: str, fields: dict[str, str]) -> None:
+        """Post the not-started edit when the broker entry itself is gone."""
+        try:
+            qevent = from_stream_fields(fields)
+            await self._kernel.notify_broker_entry_vanished(
+                qevent, lease=self._held_leases.get(entry_id)
+            )
+        except Exception:
+            logger.exception(
+                "could not post the vanished-entry notice for entry %s",
                 entry_id,
             )
 
