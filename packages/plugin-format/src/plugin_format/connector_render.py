@@ -608,17 +608,17 @@ def unhosted_mcp_entry(spec: ConnectorSpec) -> dict[str, Any] | None:
     point at IS "declared but not exercisable here" (#1093). Mounting a URL that
     resolves nowhere would turn that into a connection refused mid-turn.
 
-    Unlike ``mcp_entry``, this fallback deliberately does not derive the
-    ``Authorization`` header: no non-cluster tier stages the declared secret
-    into the runner env, so there is nothing yet to derive it from (follow-up
-    issue noted in the PR).
+    The ``Authorization`` header is derived here exactly as ``mcp_entry``
+    derives it: the skill and local tiers stage the Bearer secret named by
+    ``_derived_headers`` into the runner env (#2518), so the ``${NAME}``
+    placeholder expands there the same way it does in a cluster sandbox.
     """
 
     if not spec.is_hosted:
         return mcp_entry("", "", "", "", spec)
     if not spec.unhosted_url:
         return None
-    return {"type": "http", "url": spec.unhosted_url}
+    return {"type": "http", "url": spec.unhosted_url, **_derived_headers(spec)}
 
 
 def mcp_entry(

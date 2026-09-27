@@ -1771,6 +1771,21 @@ fn is_reserved_secret_name(name: &str) -> bool {
     name.starts_with("CURIE_") || RESERVED_CONNECTOR_SECRET_NAMES.contains(&name)
 }
 
+/// Refuse a Bearer name staged into the runner env that it must not own (#2518).
+///
+/// [`refuse_reserved_secret_names`] skips `unhosted_url` connectors, but
+/// [`hosted_env_secret_names`] keeps them, so the skill tier checks each staged
+/// name here before resolving a value for it.
+pub fn refuse_reserved_env_secret_name(name: &str) -> Result<()> {
+    if is_reserved_secret_name(name) {
+        return Err(crate::exit::usage(format!(
+            "`{name}` is a reserved platform boot-env or model-credential key and cannot be a \
+             connector Bearer secret"
+        )));
+    }
+    Ok(())
+}
+
 /// Refuse a hosted connector whose declared secret NAME it must not own.
 ///
 /// Scoped to the hosted connectors for the same reason `hosted_secret_names` is:
