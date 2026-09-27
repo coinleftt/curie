@@ -48,7 +48,18 @@ pod; if `cluster message` can't auto-detect a pod-reachable host, pass
   bare `docker run` of the same image, config, and resource limits, which
   points at minikube's node setup rather than the chart: the same chart,
   version, and overrides converge cleanly on kind, with real traces and
-  evals working.
+  evals working. `cluster up` reports success either way, so after startup
+  verify the ClickHouse pod yourself (shown for the default namespace and
+  release):
+
+  ```bash
+  kubectl -n curie get pod curie-clickhouse-0
+  ```
+
+  A healthy pod is `1/1 Running` with a `RESTARTS` count that stays put --
+  re-run after a minute if in doubt. `CrashLoopBackOff`, or a `RESTARTS`
+  count that keeps climbing on minikube, is the silent failure described
+  above: recreate the cluster with kind instead.
 
 **For production**, you'll likely point at a managed or self-hosted cluster
 instead. Name it on every `cluster` command with `--context` (see below), so a
