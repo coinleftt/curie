@@ -515,8 +515,9 @@ def test_deadline_halted_is_a_declared_terminal_turn_outcome(
         assert "deadline_halted" in outcomes
         for sibling in ("budget_halted", "interrupted", "side_effect_halted"):
             assert sibling in outcomes
+        assert "capacity_wait_expired" in outcomes
         assert "fenced_out" not in outcomes
-        assert manifest[name]["cardinality_bound"] == 192
+        assert manifest[name]["cardinality_bound"] == 216
 
 
 def test_supervised_restart_metric_declares_closed_operation_domain() -> None:

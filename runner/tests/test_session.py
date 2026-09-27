@@ -9,7 +9,14 @@ import pytest
 from aci_protocol import ErrorEvent, Event, Final, Interrupt, SessionStatus, parse_ndjson
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    RateLimitEvent,
+    ResultMessage,
+    TextBlock,
+    ToolUseBlock,
+)
+from claude_agent_sdk.types import RateLimitInfo
 from curie_runner import RunTracer, SideEffectClassifier, build_options, create_app
 from curie_runner import session as session_module
 from curie_runner.adapter import ClaudeAgentSession, McpServerReconnector
@@ -552,7 +559,7 @@ def test_persistence_stage_timeout_is_bounded_and_loss_stays_sticky(
     assert runner.history_durable is False
 
 
-def test_cancellation_during_persistence_marks_loss_without_a_terminal() -> None:
+def test_cancellation_during_persistence_marks_loss_without_a_terminal(caplog) -> None:
     store = _FirstBlockedTranscriptStore()
     runner, fake = _runner_with_history(store)
     first_lines: list[str] = []
@@ -585,10 +592,12 @@ def test_cancellation_during_persistence_marks_loss_without_a_terminal() -> None
         ]
         return parse_ndjson("".join(second_lines))
 
-    second = anyio.run(go)
+    with caplog.at_level(logging.INFO, logger="curie_runner.session"):
+        second = anyio.run(go)
     first = parse_ndjson("".join(first_lines))
     assert not any(isinstance(event, Final) for event in first)
     assert second[-1].status is SessionStatus.DONE
+    assert sum("turn end" in record.getMessage() for record in caplog.records) == 1
     assert [record.user for record in store.turns] == ["second"]
     assert fake.interrupts == 0
     assert runner.turn_active is False
@@ -780,6 +789,7 @@ def test_interrupt_precedes_iterator_exception_and_preserves_cancelled_terminal(
 
 def test_timeout_terminalizes_before_generator_close_and_emits_one_metric(
     monkeypatch: pytest.MonkeyPatch,
+    caplog,
 ) -> None:
     """Closing at a suspended yield must not let abandonment store first."""
 
@@ -823,7 +833,13 @@ def test_timeout_terminalizes_before_generator_close_and_emits_one_metric(
         await turn.aclose()
         await runner.close()
 
-    anyio.run(go)
+    with caplog.at_level(logging.INFO, logger="curie_runner.session"):
+        anyio.run(go)
+    assert sum(
+        "turn end" in record.getMessage()
+        and "status=classified-failure" in record.getMessage()
+        for record in caplog.records
+    ) == 1
     spans = list(exporter.get_finished_spans())
     root = _span_named(spans, "agent.run")[0]
     assert root.attributes["curie.terminal.cause"] == "runner_timeout"
@@ -1413,6 +1429,7 @@ def test_abandoning_a_stalled_phase_is_error_not_intentional_cancellation(
     session_type,
     expected_phase: str,
     expect_tool: bool,
+    caplog,
 ) -> None:
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
@@ -1449,7 +1466,9 @@ def test_abandoning_a_stalled_phase_is_error_not_intentional_cancellation(
             scope_holder[0].cancel()
         await runner.close()
 
-    anyio.run(go)
+    with caplog.at_level(logging.INFO, logger="curie_runner.session"):
+        anyio.run(go)
+    assert not any("turn end" in record.getMessage() for record in caplog.records)
     spans = list(exporter.get_finished_spans())
     root = _span_named(spans, "agent.run")[0]
     assert root.attributes["curie.phase"] == expected_phase
@@ -1586,12 +1605,16 @@ def test_sdk_exception_logs_turn_failure(caplog) -> None:
         classifier=SideEffectClassifier(),
         trace_name="t",
     )
-    with caplog.at_level(logging.ERROR, logger="curie_runner.session"):
+    with caplog.at_level(logging.INFO, logger="curie_runner.session"):
         events = _drain(runner, Event(type="message", text="go", user="U", ts="1"))
 
     messages = [record.getMessage() for record in caplog.records]
     assert [e.type for e in events] == ["error", "final"]
     assert events[-1].status == SessionStatus.CLASSIFIED_FAILURE
+    assert any(
+        "turn end" in message and "status=classified-failure" in message
+        for message in messages
+    )
     assert any(
         record.levelno == logging.ERROR
         and "turn failed" in record.getMessage()
@@ -1695,6 +1718,36 @@ def test_transient_model_error_is_not_fast_failed() -> None:
     assert fake.interrupts == 0  # not aborted
 
 
+def test_model_error_without_result_ends_in_classified_failure() -> None:
+    runner, _ = _runner(
+        lambda: [AssistantMessage(content=[], model="m", error="unknown")]
+    )
+    events = _drain(runner, Event(type="message", text="go", user="U", ts="1"))
+
+    assert [event.type for event in events] == ["error", "final"]
+    assert events[0].classification == "unclassified"
+    assert events[-1].status == SessionStatus.CLASSIFIED_FAILURE
+    assert runner.status == SessionStatus.CLASSIFIED_FAILURE
+
+
+def test_rejected_rate_limit_without_result_ends_in_classified_failure() -> None:
+    runner, _ = _runner(
+        lambda: [
+            RateLimitEvent(
+                rate_limit_info=RateLimitInfo(status="rejected"),
+                uuid="u",
+                session_id="s",
+            )
+        ]
+    )
+    events = _drain(runner, Event(type="message", text="go", user="U", ts="1"))
+
+    assert [event.type for event in events] == ["error", "final"]
+    assert events[0].classification == "rate-limit"
+    assert events[-1].status == SessionStatus.CLASSIFIED_FAILURE
+    assert runner.status == SessionStatus.CLASSIFIED_FAILURE
+
+
 def test_budget_halt_logged(caplog) -> None:
     script = [
         AssistantMessage(
@@ -1715,10 +1768,15 @@ def test_budget_halt_logged(caplog) -> None:
     ]
     runner, _ = _runner(lambda: script, ceiling=10)
 
-    with caplog.at_level(logging.WARNING, logger="curie_runner.session"):
+    with caplog.at_level(logging.INFO, logger="curie_runner.session"):
         events = _drain(runner, Event(type="message", text="go", user="U", ts="1"))
 
     assert events[-1].status == SessionStatus.CLASSIFIED_FAILURE
+    assert any(
+        "turn end" in record.getMessage()
+        and "status=classified-failure" in record.getMessage()
+        for record in caplog.records
+    )
     assert any(
         record.levelno == logging.WARNING and "budget halt" in record.getMessage()
         for record in caplog.records

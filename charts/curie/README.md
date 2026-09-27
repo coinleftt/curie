@@ -62,7 +62,7 @@ which can render a required value as blank. Helm 3.14 and newer provide the
 safe merge directly:
 
 ```bash
-helm upgrade curie <new-chart> -n curie --reset-then-reuse-values
+helm upgrade curie <new-chart> -n curie --reset-then-reuse-values --timeout <minimum>s
 ```
 
 For an auditable values file instead, capture the release's user supplied
@@ -76,14 +76,22 @@ values privately and pass that file over the new defaults:
   chmod 600 "$upgrade_values"
   helm get values curie -n curie -o yaml > "$upgrade_values"
   test -s "$upgrade_values"
-  helm upgrade curie <new-chart> -n curie -f "$upgrade_values"
+  helm upgrade curie <new-chart> -n curie -f "$upgrade_values" --timeout <minimum>s
 )
 ```
 
 Keep the file private because retained values can contain credentials. Remove
 it after the upgrade even when Helm fails. The commands below use
 `--reuse-values` only for same chart configuration changes, not a chart version
-upgrade.
+upgrade. The pre-upgrade drain Job publishes the required minimum in the
+`curie.ai/minimum-helm-timeout-seconds` annotation. For customized worker or
+drain budgets, use the annotation rendered from the same chart and values as
+the upgrade, and pass that value with an `s` suffix to `helm upgrade --timeout`.
+The default minimum is 2940 seconds. The chart derives it from the effective
+drain wait, 120 seconds for the Job, the effective worker termination grace,
+and 60 seconds for scheduling and Helm operations. Raising
+`worker.deliveryBudgetSeconds` raises both the effective drain wait and worker
+grace automatically, so the Helm timeout must rise too.
 
 **Upgrade drain and claim state.** Before each upgrade, a hook pauses new worker
 claims and waits for accepted deliveries to finish. The chart stores an
@@ -107,6 +115,7 @@ model credential, upgrade in place (the exact command is also printed in
 
 ```bash
 helm upgrade curie charts/curie -n curie --reuse-values \
+  --timeout <minimum>s \
   --set dispatcher.slack.appToken=xapp-... \
   --set dispatcher.slack.botToken=xoxb-... \
   --set dispatcher.slack.signingSecret=... \
@@ -137,6 +146,7 @@ API Service (`http://<fullname>-api:<api.service.port>`, derived, so an overridd
 
 ```bash
 helm upgrade curie charts/curie -n curie --reuse-values \
+  --timeout <minimum>s \
   --set dispatcher.apiBaseUrl=https://your-api.example
 ```
 
@@ -290,6 +300,18 @@ log/metrics backend. The in-chart collector receives gRPC on
 `curie-otel-collector:4317` and HTTP on `:4318`. Applications use standard
 `OTEL_EXPORTER_OTLP_*` settings. The chart owns one destination for every
 instrumented workload:
+
+`otelCollector.metricsTemporalityPreference` defaults to `delta` for push
+exporters. It sets `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` on every
+instrumented workload, including runner sandboxes. Set it to `cumulative` for
+a backend that requires cumulative counters and histograms. Prometheus remote
+write requires cumulative points, so the supplied SRE observability overlay
+sets this value to `cumulative`. The collector
+copies each runner's anonymous `service.instance.id` resource value onto its
+metric points so concurrent sandboxes retain separate series; it does not add
+an instance label to other services. For a release wide served turn count, use
+`curie.turn.completed` with `source=worker` and `outcome=done`. Runner
+completions count sandbox results and can differ from served turns.
 
 - `otelCollector.deploy: true` (default) wires the in-cluster collector.
 - `otelCollector.deploy: false` plus `otelCollector.endpoint` wires an
@@ -951,7 +973,10 @@ Scope each role to the bucket it actually uses:
   still consumes `rustfs.auth` static keys for that bucket; the key-free path
   only omits credentials from the API, the worker, and the sandbox bundle-fetch
   init container. Scope those keys (or a Langfuse-specific IAM user) to
-  `rustfs.bucket`.
+  `rustfs.bucket`. Langfuse never deletes `events/` objects after ingest. The
+  in-chart RustFS gets an expiration rule for that prefix
+  (`langfuse.eventUpload.retentionDays`, default 2), but a BYO bucket is not
+  touched, so add the same lifecycle rule to it yourself.
 
 Two constraints are worth stating plainly.
 
@@ -1231,6 +1256,20 @@ already-configured control-plane pod at admission time. Both objects are
 independently toggleable (`resourceQuota.enabled`, `limitRange.enabled`,
 each default `true`) and every ceiling is overridable, per ADR-0059 decision 6.
 
+The `ResourceQuota` is an admission ceiling, not a scheduling guarantee
+(#2949). It admits up to min(`sandboxPodCount`, `requestsCpu` / runner cpu
+request, `requestsMemory` / runner memory request, `limitsCpu` / runner cpu
+limit, `limitsMemory` / runner memory limit) sandboxes (8 with the shipped
+defaults, bound by `limitsCpu`) whether or not the nodes can hold them; past node capacity, sandboxes sit Pending until the
+claim times out. `helm install`/`upgrade` NOTES compare that ceiling with
+what fits on the schedulable nodes and warn when it is higher. That report
+lists Nodes and Pods cluster-wide during install/upgrade; if the helm identity
+cannot, the release fails, so set `resourceQuota.capacityReport=false`. A quota
+refusal is a pod create rejected with "exceeded quota"
+(`kubectl describe resourcequota <fullname>-sandbox-quota`); an unschedulable
+sandbox is a Pending pod with `FailedScheduling` events. The arithmetic and a
+worked example sit at `resourceQuota` in `values.yaml`.
+
 **Which pods outrank sandboxes (ADR-0059 decision 5, #3182).** Every
 long-running platform workload carries `priorityClassName:
 priorityClasses.platform.name`: the control plane (api, worker, dispatcher),
@@ -1243,6 +1282,13 @@ the inventory exhaustive, so a new template that forgets its class fails the
 render. The runner-prewarm DaemonSet deliberately stays unclassed (priority
 0, below the sandbox class): the image-cache pod is the designated sacrifice
 a full node evicts first.
+
+**Priority class on hooks (#3206).** When
+`priorityClasses.platform.create: true`, preinstall and preupgrade hooks omit
+the platform priority class because it can be absent until normal resources
+are applied. Postinstall and postupgrade hooks use the configured class. When
+`priorityClasses.platform.create: false`, hooks use the configured class, so
+operators must create the named class before installing the chart.
 
 **Verifying the rails.** The security-boundary probe suite re-runs as a `helm test`:
 
