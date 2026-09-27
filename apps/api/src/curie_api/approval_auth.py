@@ -118,15 +118,9 @@ def _origin_from_absolute(value: str) -> tuple[str, str, int | None] | None:
 
 
 def _expected_console_origin(request: Request) -> tuple[str, str, int | None] | None:
-    forwarded_host = request.headers.get("x-forwarded-host")
-    if forwarded_host is not None:
-        host = forwarded_host.split(",", 1)[0].strip()
-        forwarded_proto = request.headers.get("x-forwarded-proto")
-        if forwarded_proto is not None and forwarded_proto.split(",", 1)[0].strip():
-            scheme = forwarded_proto.split(",", 1)[0].strip()
-        else:
-            scheme = request.url.scheme
-        return _origin_from_absolute(f"{scheme}://{host}")
+    # Host comes from the request the API actually received. Forwarded-host
+    # headers are not consulted: the shipped UI proxy does not set them, and a
+    # caller who can set them must not be able to aim the check at their own origin.
     try:
         port = request.url.port
     except ValueError:
@@ -134,6 +128,23 @@ def _expected_console_origin(request: Request) -> tuple[str, str, int | None] | 
     if not request.url.scheme or request.url.hostname is None:
         return None
     return _origin_key(request.url.scheme, request.url.hostname, port)
+
+
+def _same_console_host(
+    claimed: tuple[str, str, int | None] | None,
+    expected: tuple[str, str, int | None] | None,
+) -> bool:
+    """True when host and port match.
+
+    Scheme is not compared. The UI proxy connects to the API over HTTP while
+    the browser's Origin uses the external scheme (HTTPS once the console is
+    served securely). A different host is still rejected, which is the
+    same-site sibling this check exists to stop.
+    """
+
+    if claimed is None or expected is None:
+        return False
+    return claimed[1:] == expected[1:]
 
 
 def _claimed_console_origin(request: Request) -> tuple[str, str, int | None] | None:
@@ -193,8 +204,9 @@ async def require_approval_principal(
         raise _unauthorized()
 
     if has_cookie and request.method.upper() not in _SAFE_ORIGIN_METHODS:
-        claimed = _claimed_console_origin(request)
-        if claimed is None or claimed != _expected_console_origin(request):
+        if not _same_console_host(
+            _claimed_console_origin(request), _expected_console_origin(request)
+        ):
             raise _console_origin_rejected()
 
     if has_adapter:
