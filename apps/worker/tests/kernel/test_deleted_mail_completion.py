@@ -179,7 +179,12 @@ def test_refused_provider_connection_persists_completion_cause(
                         completion_sweep_grace_s=0.0,
                         sink=sink,
                     ) as h:
-                        consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+                        consumer = Consumer(
+                            redis=h.async_redis,
+                            kernel=h.kernel,
+                            config=h.config,
+                            leases=DeliveryLeaseStore(h.async_redis, h.config),
+                        )
                         await consumer.ensure_group()
                         qe = _qevent(event_id=f"refused-{refusal_stage}").model_copy(
                             update={
@@ -269,13 +274,14 @@ def test_egress_refusal_cause_refuses_stale_generation(make_harness) -> None:
 
 def test_fenced_settle_clears_cause_only_for_current_owner(make_harness) -> None:
     from curie_dispatcher.queue import to_stream_fields
-    from curie_worker.delivery_lease import DeliveryLeaseStore
 
     async def go() -> None:
         async with make_harness(shimmer=False) as h:
             markers = Markers(h.async_redis, h.config)
             leases = DeliveryLeaseStore(h.async_redis, h.config)
-            consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+            consumer = Consumer(
+                redis=h.async_redis, kernel=h.kernel, config=h.config, leases=leases
+            )
             await consumer.ensure_group()
 
             event_id = "fenced-refusal"
@@ -371,7 +377,12 @@ def test_generic_retry_failure_clears_refusal_cause_without_clearing_completion(
                 completion_sweep_grace_s=0.0,
                 sink=sink,
             ) as h:
-                consumer = Consumer(redis=h.async_redis, kernel=h.kernel, config=h.config)
+                consumer = Consumer(
+                    redis=h.async_redis,
+                    kernel=h.kernel,
+                    config=h.config,
+                    leases=DeliveryLeaseStore(h.async_redis, h.config),
+                )
                 await consumer.ensure_group()
                 qe = _qevent(event_id="refusal-then-fault").model_copy(
                     update={
