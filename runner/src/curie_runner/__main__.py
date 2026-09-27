@@ -364,6 +364,8 @@ def build_runner(
             operator_tools=config.approval_required_tools,
             policy_routes=resolution.route_by_tool,
             grant_tool=config.approval_grant_tool,
+            grant_arguments=config.approval_grant_arguments,
+            resumed_kind=config.approval_resumed_kind,
             grantable_by_route=resolution.grantable_by_route,
             summary_by_tool=resolution.summary_by_tool,
             # Bundle identity so an operator mcp__<server>__<tool> shorthand
