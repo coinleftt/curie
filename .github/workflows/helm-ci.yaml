@@ -206,6 +206,13 @@ jobs:
           set -euo pipefail
           bash charts/curie/ci/valkey-tls-assertions.sh
 
+      # The in-chart Valkey process must fsync an AOF. RDB snapshots alone
+      # roll the stream and the delivery leases back across an unclean crash.
+      - name: helm render assertions (valkey AOF)
+        run: |
+          set -euo pipefail
+          bash charts/curie/ci/valkey-aof-assertions.sh
+
       # Prove every Postgres DSN carries a TLS parameter when asked, and that
       # the signal reaches both driver families rather than one of them (#2431).
       # SQLAlchemy/asyncpg needs ?ssl=require; Prisma needs ?sslmode=no-verify;
