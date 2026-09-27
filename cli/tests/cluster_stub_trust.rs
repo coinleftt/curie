@@ -1043,22 +1043,14 @@ fn cluster_eval_timeout_names_the_missing_relay_reply_not_stream_internals() {
         .output()
         .expect("run cluster eval relay timeout");
     // Red eval is Failure (1), not usage (2) and not a transient message timeout (3).
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "{}",
-        describe(&output)
-    );
+    assert_eq!(output.status.code(), Some(1), "{}", describe(&output));
     let report = json_output(&output);
     let case = &report["cases"][0];
     assert_eq!(case["outcome"], "fail", "{report}");
     let graded = case["output"].as_str().expect("case output is a string");
     // Stable substrings: "cluster message relay" and "deadline".
     // The case output must not dump stream internals under replied.
-    assert!(
-        graded.contains("cluster message relay"),
-        "{graded}"
-    );
+    assert!(graded.contains("cluster message relay"), "{graded}");
     assert!(graded.contains("deadline"), "{graded}");
     assert!(!graded.contains("XLEN"), "{graded}");
     assert!(!graded.contains("XPENDING"), "{graded}");

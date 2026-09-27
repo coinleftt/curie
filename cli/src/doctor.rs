@@ -1190,7 +1190,7 @@ fn evaluate_with_worker_claims(
         (false, false) => skipped(
             "slack",
             "Slack",
-            "no tokens recorded; reachable with `curie cluster message`",
+            "no tokens recorded; reachable with `curie cluster message` and `curie cluster eval`",
         ),
     });
 
@@ -1333,7 +1333,7 @@ pub fn summary(checks: &[Check]) -> String {
     }
     if !has("slack") {
         return "Deployable to the cluster. Slack is not wired; talk to the agent with \
-                `curie cluster message`."
+                `curie cluster message` or `curie cluster eval`."
             .to_string();
     }
     if !has("clone-credential")
