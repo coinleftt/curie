@@ -4432,6 +4432,10 @@ def judge_quiesce(obs: Mapping[str, Any]) -> list[str]:
             f"path A: the drain process was not SIGKILLed ({obs.get('path_a_kill_method')!r}), "
             "so a clear could be SIGTERM cleanup rather than the lease lapsing"
         )
+    if obs.get("path_a_state_after_kill") != "quiescing":
+        failures.append(
+            f"path A: right after the SIGKILL the state was {obs.get('path_a_state_after_kill')!r}"
+        )
     if obs.get("path_a_quiescing_seen") is not True:
         failures.append("path A: no quiescing state seen while helm waited on the drain")
     code = obs.get("path_a_helm_exit_code")
@@ -4794,6 +4798,9 @@ def quiesce(p: Preflight) -> dict[str, Any]:
         # can clear the marker, then delete the Job. The marker must lapse
         # within one lease on its own.
         obs["path_a_kill_method"] = _sigkill_drain(p, obs)
+        # Still held right after the kill: a clear here would mean the kill
+        # reached a handler (or the wrong process) instead of the lease lapsing.
+        obs["path_a_state_after_kill"] = (_claim_status(p) or {}).get("state")
         deleted = time.time()
         p.kubectl("-n", p.namespace, "delete", "job", job_name, "--wait=false", check=False)
         obs["path_a_clear_seconds"] = _poll_until_clear(
