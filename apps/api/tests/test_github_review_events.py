@@ -2703,7 +2703,9 @@ def _write_actual_fenced_review_terminal(client, event_id: str, stream: str) -> 
                 generation=lease.generation,
             ) is not None
         finally:
-            await store.release(stream, lease.group, entry_id, owner=lease.owner)
+            await store.release(
+                stream, lease.group, entry_id, owner=lease.owner, resume_event_id=None
+            )
 
     client.portal.call(settle)
 
@@ -2821,7 +2823,8 @@ def test_actual_consumer_dead_letter_settles_only_the_matching_review_origin(rev
             async with consumer._delivery_lease(entry_id, fields) as stale:
                 assert stale is not None
                 assert await leases.release(
-                    stream, h.config.consumer_group, entry_id, owner=stale.owner
+                    stream, h.config.consumer_group, entry_id, owner=stale.owner,
+                    resume_event_id=None,
                 )
                 await h.async_redis.xclaim(
                     stream, h.config.consumer_group, "replacement",
@@ -2840,7 +2843,8 @@ def test_actual_consumer_dead_letter_settles_only_the_matching_review_origin(rev
                     assert await client.app.state.github_review_reconciler.reconcile_terminal() == 0
                 finally:
                     await leases.release(
-                        stream, h.config.consumer_group, entry_id, owner=current.owner
+                        stream, h.config.consumer_group, entry_id, owner=current.owner,
+                        resume_event_id=None,
                     )
             await h.async_redis.xclaim(
                 stream, h.config.consumer_group, h.config.consumer_name,

@@ -145,6 +145,7 @@ def test_review_terminal_observer_requires_exact_current_fenced_completion(
                 h.config.consumer_group,
                 entry_id,
                 owner=stale.owner,
+                resume_event_id=None,
             )
             await h.async_redis.xclaim(
                 h.config.stream,

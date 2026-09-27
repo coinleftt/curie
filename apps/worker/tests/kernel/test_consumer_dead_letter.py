@@ -1096,7 +1096,8 @@ def test_a_live_lease_holds_off_the_cap_and_releasing_it_dead_letters_normally(
             # count, dead-letters on the next pass.
             assert (
                 await store.release(
-                    h.config.stream, h.config.consumer_group, entry_id, owner=lease.owner
+                    h.config.stream, h.config.consumer_group, entry_id, owner=lease.owner,
+                    resume_event_id=None,
                 )
                 is True
             )
@@ -1266,7 +1267,8 @@ def test_the_maintenance_scan_dead_letters_normally_when_nobody_owns_the_entry(
                 )
                 assert (
                     await store.release(
-                        h.config.stream, h.config.consumer_group, entry_id, owner=lease.owner
+                        h.config.stream, h.config.consumer_group, entry_id, owner=lease.owner,
+                        resume_event_id=None,
                     )
                     is True
                 )
@@ -1369,7 +1371,8 @@ def test_a_failed_settle_makes_the_dead_letter_report_failure_not_a_clean_row(
                     h.config.stream, h.config.consumer_group, entry_id, consumer="peer-worker"
                 )
                 await store.release(
-                    h.config.stream, h.config.consumer_group, entry_id, owner=lease.owner
+                    h.config.stream, h.config.consumer_group, entry_id, owner=lease.owner,
+                    resume_event_id=None,
                 )
                 assert await h.async_redis.exists(state_key) == 1
                 assert consumer._held_leases == {}
@@ -1822,7 +1825,8 @@ def test_the_graveyard_write_precedes_the_ack_so_a_failed_write_leaves_it_pendin
                     h.config.stream, h.config.consumer_group, entry_id, consumer="peer-worker"
                 )
                 await store.release(
-                    h.config.stream, h.config.consumer_group, entry_id, owner=lease.owner
+                    h.config.stream, h.config.consumer_group, entry_id, owner=lease.owner,
+                    resume_event_id=None,
                 )
 
                 await h.async_redis.set(dead, "not-a-stream")
