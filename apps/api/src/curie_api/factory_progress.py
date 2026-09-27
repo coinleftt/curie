@@ -457,6 +457,7 @@ def phase_view(
 
 
 _PILLS: dict[str, tuple[str, str, bool]] = {
+    "queued": ("QUEUED", "#9a6700", False),
     "waiting": ("QUEUED", "#9a6700", False),
     "running": ("RUNNING", "#2f81f7", True),
     "cancellation_requested": ("STOPPING", "#bc4c00", True),

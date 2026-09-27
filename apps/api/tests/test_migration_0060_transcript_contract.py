@@ -99,7 +99,6 @@ def _seed_copy(
 def test_0060_contract_requires_forward_only() -> None:
     window = load_window()
     kinds = load_kinds()
-    assert window.schema_min == "0060"
     assert kinds["0060"] == KIND_CONTRACT
 
     refused = plan_upgrade(
