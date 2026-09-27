@@ -32,6 +32,7 @@ from curie_runner.mcp_tool_capability import (
     ConnectorCapabilityFailure,
 )
 from curie_runner.session import SessionRunner
+from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -1493,6 +1494,57 @@ def test_turn_lifecycle_logged(caplog) -> None:
     assert any("turn start" in message and "user=U-log" in message for message in messages)
     assert any("turn end" in message and "status=done" in message for message in messages)
     assert any("tool call" in message and "tool=Bash" in message for message in messages)
+
+
+def test_no_tool_turn_start_log_carries_its_agent_run_trace(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    fake = FakeModelSession(
+        lambda: [
+            ResultMessage(
+                subtype="success",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=False,
+                num_turns=1,
+                session_id="fake-session",
+                result="done",
+                usage=None,
+            )
+        ]
+    )
+    runner = SessionRunner(
+        session_factory=lambda: fake,
+        ceiling=0,
+        tracer=RunTracer(provider),
+        classifier=SideEffectClassifier(),
+        trace_name="no-tool-turn",
+    )
+    contexts: list[tuple[int, int]] = []
+
+    class CaptureStart(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if "turn start" in record.getMessage():
+                context = trace.get_current_span().get_span_context()
+                contexts.append((context.trace_id, context.span_id))
+
+    logger = logging.getLogger("curie_runner.session")
+    capture = CaptureStart()
+    logger.addHandler(capture)
+    try:
+        with caplog.at_level(logging.INFO, logger="curie_runner.session"):
+            events = _drain(runner, Event(type="message", text="go", user="U", ts="1"))
+    finally:
+        logger.removeHandler(capture)
+
+    spans = list(exporter.get_finished_spans())
+    root = _span_named(spans, "agent.run")[0]
+    assert events[-1].status == SessionStatus.DONE
+    assert not _span_named(spans, "execute_tool")
+    assert contexts == [(root.context.trace_id, root.context.span_id)]
 
 
 def test_bare_interrupt_yields_idle_final() -> None:
