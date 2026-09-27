@@ -294,6 +294,24 @@ def substitute(value: str, subs: dict[str, str]) -> str:
     return value
 
 
+def _readiness_probe() -> dict[str, Any]:
+    """``tcpSocket`` on the connector port.
+
+    The connector spec declares no health path today, so the probe checks the
+    one thing every MCP server must do: accept a connection on its port. That
+    catches a server that hangs before binding, fails to bind, or listens on
+    the wrong port (#3058).
+    """
+
+    return {
+        "tcpSocket": {"port": "http"},
+        "initialDelaySeconds": 2,
+        "periodSeconds": 10,
+        "timeoutSeconds": 3,
+        "failureThreshold": 3,
+    }
+
+
 def render_deployment(
     release: str,
     agent: str,
@@ -413,6 +431,13 @@ def render_deployment(
                             "env": env,
                             **({"volumeMounts": volume_mounts} if volume_mounts else {}),
                             "ports": [{"name": "http", "containerPort": spec.port}],
+                            # Without a probe, Ready means only "the process
+                            # started", so a server that hangs, fails to bind,
+                            # or listens on the wrong port stays Available and
+                            # CurieConnectorNotReady can never see it (#3058).
+                            # Readiness only, never liveness: a slow upstream
+                            # leaves the Service, it is not restarted in a loop.
+                            "readinessProbe": _readiness_probe(),
                             "securityContext": {
                                 "allowPrivilegeEscalation": False,
                                 "readOnlyRootFilesystem": True,
@@ -485,12 +510,15 @@ def render_ingress_networkpolicy(
     switches it from allow-by-default to deny-by-default for that direction).
     A separate default-deny object would be inert.
 
-    Safe here specifically because the connector Deployment declares no probes:
-    an ingress policy that omits the kubelet would otherwise fail readiness and
-    take the connector out of its Service endpoints -- the failure mode being a
-    connector that is healthy, running, and unreachable. If probes are ever
-    added to ``render_deployment``, this rule has to grow a companion for them
-    in the same commit.
+    The connector Deployment carries a readiness probe (#3058), and this policy
+    deliberately grows no kubelet rule for it. The NetworkPolicy API guarantees
+    it: "When a pod is isolated for ingress, the only allowed connections into
+    the pod are those from the pod's node and those allowed by the ingress list"
+    (kubernetes.io, Network Policies). The kubelet's probe comes from the pod's
+    node, so it needs no ``from``. A CNI that denies it violates that contract
+    and breaks every probed pod behind a policy, not just this one. Adding one would
+    mean an ``ipBlock`` of node addresses: unknowable at render time, and wide
+    enough to readmit every hostNetwork pod this rule exists to keep out.
     """
 
     return {
