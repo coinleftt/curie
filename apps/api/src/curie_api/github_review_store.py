@@ -669,21 +669,26 @@ class GitHubReviewReconciler:
                         PublicationReviewReservation, row.reservation_id, with_for_update=True
                     )
                     if reservation is None or reservation.origin_key != row.event_id:
-                        row.error_code = "feedback_reservation_identity_lost"
-                        row.version += 1
-                        continue
-                    if reservation.status == "reserved":
-                        if await session.get(Publication, reservation.id) is not None:
-                            row.error_code = "feedback_reservation_publication_conflict"
+                        if terminal != "history_capacity":
+                            row.error_code = "feedback_reservation_identity_lost"
                             row.version += 1
                             continue
-                        await crud.cancel_review_revision(
-                            session, reservation.id, origin_key=row.event_id,
-                            expected_version=reservation.version,
-                        )
-                    consumed = reservation.status == "consumed"
-                    # A consumed reservation is owned by the sole publication
-                    # writer and must never be cancelled by this observer.
+                    else:
+                        if reservation.status == "reserved":
+                            if await session.get(Publication, reservation.id) is not None:
+                                if terminal != "history_capacity":
+                                    row.error_code = "feedback_reservation_publication_conflict"
+                                    row.version += 1
+                                    continue
+                                consumed = True
+                            else:
+                                await crud.cancel_review_revision(
+                                    session, reservation.id, origin_key=row.event_id,
+                                    expected_version=reservation.version,
+                                )
+                        consumed = consumed or reservation.status == "consumed"
+                        # A consumed reservation or existing publication is
+                        # owned by the publication writer, not this observer.
                 if dead_lettered:
                     row.status, row.error_code = "dead_lettered", "delivery_dead_lettered"
                 elif terminal == "history_capacity":
