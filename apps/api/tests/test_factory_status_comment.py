@@ -611,6 +611,55 @@ def test_a_comment_deleted_by_a_human_is_recreated_once(admitted: Any) -> None: 
 # --- 9: revision threads -------------------------------------------------------------------
 
 
+def test_queued_review_revision_replies_that_it_waits_for_the_current_run(
+    admitted: Any,  # noqa: F811
+) -> None:
+    client, github, sink = admitted
+    sink.by_path = True
+    number, pr, first = _published_issue(client, github, sink)
+    running = _insert_revision(
+        first["work_item_id"], number, _revision_objective(pr, "discussion_r88203")
+    )
+    _start_running(running)
+    queued = uuid.uuid4()
+    _execute(
+        "INSERT INTO curie.execution_requests "
+        "(id, work_item_id, sequence, status, wait_deadline, objective, requester, reply_kind, "
+        "reply_address, reply_conversation_id) VALUES "
+        "(:id, :work_item, 3, 'queued', clock_timestamp() + interval '30 seconds', :objective, "
+        "'github:6601:octocat', 'github', :repo, :conversation)",
+        {
+            "id": queued,
+            "work_item": first["work_item_id"],
+            "objective": _revision_objective(pr, "discussion_r88204"),
+            "repo": REPO,
+            "conversation": f"issue-{number}",
+        },
+    )
+    _execute(
+        "UPDATE curie.work_items SET next_sequence = 4, version = version + 1 "
+        "WHERE id = :id",
+        {"id": first["work_item_id"]},
+    )
+    _execute(
+        "INSERT INTO curie.factory_terminal_notices "
+        "(execution_request_id, work_item_id) VALUES (:id, :work_item)",
+        {"id": queued, "work_item": first["work_item_id"]},
+    )
+    sink.requests.clear()
+
+    _reconcile()
+
+    (comment,) = _marked(sink, queued)
+    body = comment["body"].lower()
+    assert "waiting" in body and "current run" in body
+    assert FINAL_MARKER not in comment["body"]
+    assert [path for path, _ in _posts(sink)] == [
+        f"/repos/{REPO}/pulls/{pr}/comments/88204/replies"
+    ]
+    assert _notices(queued)[0]["posted_at"] is not None
+
+
 def _live_revision(
     client: Any, github: Any, sink: Any, fragment: str
 ) -> tuple[int, int, uuid.UUID, Any]:
