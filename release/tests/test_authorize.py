@@ -1752,7 +1752,14 @@ class TestLegitimateSkips:
         }
         images_if = "${{ needs.changes.outputs.images == 'true' }}"
         expected = {
-            "worker-local-image": images_if,
+            "ci-images": (
+                "${{ needs.changes.outputs.images == 'true' || "
+                "needs.changes.outputs.skill == 'true' || "
+                "needs.changes.outputs.local == 'true' || "
+                "needs.changes.outputs.local_release == 'true' || "
+                "needs.changes.outputs.cluster == 'true' || "
+                "needs.changes.outputs.released_upgrade == 'true' }}"
+            ),
             "dispatcher-image-smoke": images_if,
             "repo-toolchain-proof": images_if,
             "eval-falsifiability": "${{ needs.changes.outputs.skill == 'true' }}",
