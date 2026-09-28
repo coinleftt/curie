@@ -89,7 +89,7 @@ PROTECTED_STEPS = frozenset(
     {
         ("ci.yaml", "python-pytest", "Pytest"),
         ("ci.yaml", "python", "Docs gate (catalog drift + agent contract + citations)"),
-        ("ci.yaml", "rust", "Test"),
+        ("ci.yaml", "rust-test", "Test"),
         ("ci.yaml", "ui", "Lint"),
         ("ci.yaml", "ui", "Command manifest is current"),
         ("ci.yaml", "commit-messages", "Check the PR's commit messages"),
