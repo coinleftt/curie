@@ -15,6 +15,8 @@ on:
       - "charts/curie/**"
       - "examples/sre-bot/**"
       - ".github/workflows/helm-ci.yaml"
+      - ".github/workflows/ci.yaml"
+      - ".github/workflows/release.yaml"
       # The Chart job below is the only CI run of the chart assertion
       # scripts, and several read or EXECUTE repository code outside charts/: the object-store web-identity and threaded bot allowlist gates
       # import the real api, worker, and dispatcher config through `uv run`;
@@ -22,7 +24,8 @@ on:
       # Python driver under cli/tests/data; observability-stack and
       # worker-ttl-bounds cross-check cli/src and cli/scripts; render reads the
       # generated aci-protocol bindings; security-probe runs scripts/; and the
-      # image-pin gates read the compose files. A PR that breaks one of those
+      # image-pin gates read the compose files; and mail-adapter-wiring reads
+      # the ci.yaml and release.yaml image build matrices. A PR that breaks one of those
       # without touching charts/ must still run this workflow, or the gate
       # that exists to catch it is skipped. Whole trees are listed rather than
       # single files so a new script reading a new file cannot silently fall
