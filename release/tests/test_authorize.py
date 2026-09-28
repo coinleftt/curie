@@ -1835,6 +1835,7 @@ class TestLegitimateSkips:
             "pytest=true",
             "images=true",
             "cli_release=true",
+            "released_upgrade_full=true",
         ], (
             "ci.yaml's push selection no longer emits the complete tier contract: "
             f"{github_output.read_text()!r}"
