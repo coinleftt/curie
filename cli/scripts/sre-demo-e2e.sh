@@ -755,7 +755,7 @@ assert_scale() {
   wait_replicas "$DEMO_NS" "$DEMO_DEPLOY" 1
   hold_scale_at_one() { wait_replicas "$DEMO_NS" "$DEMO_DEPLOY" 1; }
   id="$(drive_gated_turn \
-    "Scale the ${DEMO_DEPLOY} Deployment in namespace ${DEMO_NS} from 1 replica to 2 using resources_scale. Request approval first." \
+    "Scale the ${DEMO_DEPLOY} Deployment in namespace ${DEMO_NS} from 1 replica to 2: call resources_scale once with scale: 2. Read the current count with resources_get, never with resources_scale. Make the resources_scale call now without asking in chat; the call itself raises the approval request." \
     "mcp__kubernetes__resources_scale" \
     approve \
     hold_scale_at_one)"
@@ -777,7 +777,7 @@ assert_rearm() {
   wait_replicas "$DEMO_NS" "$DEMO_DEPLOY" 2
   hold_scale_at_two() { wait_replicas "$DEMO_NS" "$DEMO_DEPLOY" 2; }
   id="$(drive_gated_turn \
-    "Scale the ${DEMO_DEPLOY} Deployment in namespace ${DEMO_NS} from 2 replicas to 3 using resources_scale. Request a fresh approval; do not reuse a prior grant." \
+    "Scale the ${DEMO_DEPLOY} Deployment in namespace ${DEMO_NS} from 2 replicas to 3: call resources_scale once with scale: 3. Read the current count with resources_get, never with resources_scale. Make the resources_scale call now without asking in chat; the call itself raises a fresh approval request, and no prior grant applies." \
     "mcp__kubernetes__resources_scale" \
     reject \
     hold_scale_at_two)"
@@ -819,7 +819,7 @@ assert_rbac_ceiling() {
     [[ "$(spec_replicas_of "$NAMESPACE" "${RELEASE}-api")" == "$before" ]]
   }
   id="$(drive_gated_turn \
-    "Use Kubernetes resources_scale to scale the ${RELEASE}-api Deployment in namespace ${NAMESPACE} from ${before} replica(s) to ${want}. Request approval first. Do not use any other mutation tool." \
+    "Use Kubernetes resources_scale to scale the ${RELEASE}-api Deployment in namespace ${NAMESPACE} from ${before} replica(s) to ${want}: call resources_scale once with scale: ${want}. Read the current count with resources_get, never with resources_scale. Make the resources_scale call now without asking in chat; the call itself raises the approval request. Do not use any other mutation tool." \
     "mcp__kubernetes__resources_scale" \
     approve \
     hold_platform_replicas)"
