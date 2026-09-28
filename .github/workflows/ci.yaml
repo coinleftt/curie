@@ -517,14 +517,23 @@ jobs:
         run: |
           set -euo pipefail
           echo "lint=$LINT select=$SELECT selected=${SELECTED:-<empty>} tests=$TESTS"
-          [ "$LINT" = success ] || { echo "Rust fmt + clippy did not pass" >&2; exit 1; }
-          [ "$SELECT" = success ] || { echo "Rust test selection did not pass" >&2; exit 1; }
+          if [ "$LINT" != success ]; then
+            echo "Rust fmt + clippy did not pass" >&2
+            exit 1
+          fi
+          if [ "$SELECT" != success ]; then
+            echo "Rust test selection did not pass" >&2
+            exit 1
+          fi
           case "$SELECTED" in
             true) expected=success ;;
             false) expected=skipped ;;
             *) echo "Rust test selection must be true or false" >&2; exit 1 ;;
           esac
-          [ "$TESTS" = "$expected" ] || { echo "Rust test partitions: expected $expected, got $TESTS" >&2; exit 1; }
+          if [ "$TESTS" != "$expected" ]; then
+            echo "Rust test partitions: expected $expected, got $TESTS" >&2
+            exit 1
+          fi
           echo "Rust gate passed (tests $expected)"
 
   # The release binary the e2e ladder + falsifiability gate consume, split out of
