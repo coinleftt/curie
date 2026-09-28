@@ -5035,7 +5035,11 @@ rung_local_release() {
     if (( LOCAL_STACK_OWNED )); then
         echo
         echo "=== curie local down -f compose.release.yaml ==="
-        "$BIN" local down -f "$release_compose"
+        local down_args=(local down --project "$COMPOSE_PROJECT" -f "$release_compose")
+        for ((extra_i = 1; extra_i < ${#COMPOSE_FILES[@]}; extra_i++)); do
+            down_args+=(-f "${COMPOSE_FILES[$extra_i]}")
+        done
+        "$BIN" "${down_args[@]}"
         LOCAL_STACK_OWNED=0
 
         echo
