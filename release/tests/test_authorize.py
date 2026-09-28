@@ -1308,13 +1308,16 @@ class TestHelmCiWorkflowTriggers:
         # is the only CI run of charts/curie/ci/, and those scripts read or
         # execute code in each of these trees (the api, worker, and
         # dispatcher config through `uv run`, the CLI through cargo, the
-        # aci-protocol bindings, scripts/, the compose files). A PR touching
+        # aci-protocol bindings, scripts/, the compose files, the ci.yaml and
+        # release.yaml image matrices). A PR touching
         # only one of them must still match this filter or the gate that
         # exists to catch it never runs.
         assert triggers["pull_request"]["paths"] == [
             "charts/curie/**",
             "examples/sre-bot/**",
             ".github/workflows/helm-ci.yaml",
+            ".github/workflows/ci.yaml",
+            ".github/workflows/release.yaml",
             "cli/**",
             "apps/api/**",
             "apps/worker/**",
