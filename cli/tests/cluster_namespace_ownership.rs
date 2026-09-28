@@ -8,9 +8,11 @@
 //! Hook Jobs use Helm's documented `helm.sh/hook` annotation:
 //! https://helm.sh/docs/topics/charts_hooks/
 
+#[path = "support/executable.rs"]
+mod test_executable;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use serde_json::{json, Value};
@@ -24,14 +26,6 @@ fn bin() -> &'static str {
 
 fn chart() -> &'static str {
     concat!(env!("CARGO_MANIFEST_DIR"), "/../charts/curie")
-}
-
-fn write_exec(dir: &Path, name: &str, body: &str) {
-    let path = dir.join(name);
-    fs::write(&path, body).expect("write fake executable");
-    let mut permissions = fs::metadata(&path).expect("stat fake").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("chmod fake executable");
 }
 
 const FAKE_CLUSTER: &str = r###"#!/usr/bin/env python3
@@ -275,8 +269,8 @@ impl Fixture {
         let temp = tempfile::tempdir().expect("tempdir");
         let bin_dir = temp.path().join("bin");
         fs::create_dir(&bin_dir).expect("create bin dir");
-        write_exec(&bin_dir, "helm", FAKE_CLUSTER);
-        write_exec(&bin_dir, "kubectl", FAKE_CLUSTER);
+        test_executable::install_in(&bin_dir, "helm", FAKE_CLUSTER);
+        test_executable::install_in(&bin_dir, "kubectl", FAKE_CLUSTER);
         let state = temp.path().join("state.json");
         let log = temp.path().join("commands.log");
         fs::write(&log, "").expect("write log");

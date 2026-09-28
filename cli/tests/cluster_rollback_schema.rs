@@ -5,8 +5,10 @@
 //! 0.8.4's migrate init container does not know. This file pins the additional
 //! pre-mutation gate. Status filtering stays in `cluster_rollback.rs`.
 
+#[path = "support/executable.rs"]
+mod test_executable;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Output;
 
@@ -199,14 +201,6 @@ fn v091_source_upgrades_through_the_packaged_chart_graph() {
     assert_eq!(decision.target_min, "0063");
 }
 
-fn write_exec(dir: &Path, name: &str, body: &str) {
-    let path = dir.join(name);
-    fs::write(&path, body).expect("write fake executable");
-    let mut perms = fs::metadata(&path).expect("stat fake").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).expect("chmod fake executable");
-}
-
 fn rollback_opts() -> RollbackOpts {
     RollbackOpts {
         common: CommonOpts {
@@ -270,7 +264,7 @@ impl RollbackFixture {
                 format!("cat '{}' >&2; exit 1", manifest_error_path.display())
             }
         };
-        write_exec(
+        test_executable::install_in(
             dir.path(),
             "helm",
             &format!(
@@ -286,7 +280,7 @@ impl RollbackFixture {
                 history = history_path.display(),
             ),
         );
-        write_exec(
+        test_executable::install_in(
             dir.path(),
             "kubectl",
             &format!(
@@ -421,7 +415,7 @@ async fn v085_revision_0039_to_v084_is_refused_before_helm_mutates() {
     std::env::set_var("FAKE_HELM_ROLLBACK_LOG", &rollback_log);
     std::env::set_var("FAKE_KUBECTL_LOG", &kubectl_log);
 
-    write_exec(
+    test_executable::install_in(
         dir.path(),
         "helm",
         "#!/bin/sh\n\
@@ -435,7 +429,7 @@ async fn v085_revision_0039_to_v084_is_refused_before_helm_mutates() {
     );
     // Probe stdout is only the alembic current line. Stderr plants a DSN so a
     // leak in the refusal would fail the redaction assertion below.
-    write_exec(
+    test_executable::install_in(
         dir.path(),
         "kubectl",
         "#!/bin/sh\n\
@@ -726,7 +720,7 @@ fn json_refusal_is_nonzero_actionable_and_redacted() {
     let dir = tempfile::tempdir().expect("tempdir");
     let history = dir.path().join("history.json");
     fs::write(&history, issue_2296_history_json()).expect("write history");
-    write_exec(
+    test_executable::install_in(
         dir.path(),
         "helm",
         &format!(
@@ -741,7 +735,7 @@ fn json_refusal_is_nonzero_actionable_and_redacted() {
             history = history.display(),
         ),
     );
-    write_exec(
+    test_executable::install_in(
         dir.path(),
         "kubectl",
         "#!/bin/sh\necho 'postgresql://curie:secret-password@postgres:5432/curie' >&2\necho '0039 (head)'\n",
