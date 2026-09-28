@@ -2112,15 +2112,6 @@ def test_slack_manifest_declares_the_files_read_probe_scope() -> None:
     assert "channels:read" in bot_scopes
 
 
-def test_slack_manifest_declares_the_preflight_scope() -> None:
-    """The installable manifest must grant what the boot gate exercises."""
-    manifest = yaml.safe_load(
-        (Path(__file__).parents[1] / "slack-app-manifest.yaml").read_text()
-    )
-
-    assert "channels:read" in manifest["oauth_config"]["scopes"]["bot"]
-
-
 def _set_run_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear ambient dispatcher config and install only public test values."""
     for name, field in DispatcherConfig.model_fields.items():

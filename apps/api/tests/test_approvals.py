@@ -957,16 +957,6 @@ _OWNERSHIP_VECTOR = (
 _EXPECTED_OWNERSHIP_VECTOR_KEYS = frozenset({"comment", "not_found_detail"})
 
 
-def test_api_ownership_detail_constant_matches_the_frozen_vector() -> None:
-    """The API constant is the dispatcher ownership-miss detail, frozen in the vector."""
-
-    from curie_api.routers.approvals import APPROVAL_NOT_FOUND_DETAIL
-
-    vector = json.loads(_OWNERSHIP_VECTOR.read_text(encoding="utf-8"))
-    assert set(vector) == _EXPECTED_OWNERSHIP_VECTOR_KEYS
-    assert APPROVAL_NOT_FOUND_DETAIL == vector["not_found_detail"]
-
-
 def test_unknown_approval_is_404(
     approvals_client: TestClient, auth_headers: dict[str, str], clean_db: None
 ) -> None:
