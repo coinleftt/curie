@@ -1962,7 +1962,8 @@ worker:
   # Turn budget for a work-item (factory) delivery (#3071), rendered as
   # CURIE_WORK_ITEM_MAX_TURNS. The worker writes it into that delivery's
   # sandbox as CURIE_MAX_TURNS; chat and other deliveries keep the runner's
-  # short default. A run that exhausts it fails as `max-turns`.
+  # short default (CURIE_MAX_TURNS via runner.extraEnv). A run that exhausts
+  # either cap fails as `max-turns`, and the escalation names the one it hit.
   workItemMaxTurns: 1000
   # Pre-upgrade drain gate (issue #2010). ADR-0131 made one worker's own
   # shutdown safe; it says nothing about the roll happening around it. A
