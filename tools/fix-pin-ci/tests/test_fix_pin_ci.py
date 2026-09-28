@@ -555,6 +555,37 @@ def test_shell_metacharacters_fail_before_the_verifier_runs(tmp_path: Path) -> N
     assert not marker.exists(), "the declaration must never be interpolated into a shell command"
 
 
+def test_failed_verification_says_rerunning_unchanged_will_not_help(
+    tmp_path: Path,
+) -> None:
+    completed, call_log = _run_checker(
+        tmp_path,
+        f"Fix pin: {VALID_SELECTOR}",
+        verifier_exit=97,
+        verifier_stdout="UNPINNED\n",
+    )
+
+    output = f"{completed.stdout}\n{completed.stderr}"
+    assert completed.returncode == 97
+    assert call_log.exists(), "a valid declaration must reach curie"
+    assert "This failure is deterministic." in output
+    assert "Edit the PR body's `Fix pin:` declaration or add a changed test." in output
+    assert "Rerunning unchanged will not help." in output
+
+
+def test_verifier_error_does_not_claim_a_deterministic_pin_failure(tmp_path: Path) -> None:
+    completed, call_log = _run_checker(
+        tmp_path,
+        f"Fix pin: {VALID_SELECTOR}",
+        verifier_exit=97,
+        verifier_stdout="not inside a git repository\n",
+    )
+
+    assert completed.returncode == 97
+    assert call_log.exists()
+    assert "This failure is deterministic." not in completed.stderr
+
+
 @pytest.mark.parametrize("verifier_stdout", ["", "NOT PINNED\n", "PINNED extra\n"])
 def test_verifier_exit_zero_requires_an_exact_pinned_marker(
     tmp_path: Path, verifier_stdout: str
