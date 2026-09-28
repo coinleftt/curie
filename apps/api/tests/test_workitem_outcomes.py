@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import channel_protocol
 import httpx
@@ -48,7 +48,7 @@ from curie_api.workitem_outcomes import derive_outcome
 from curie_test_support.valkey import connect_or_skip
 from fastapi.testclient import TestClient
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 REPO = "acme-corp/acme-bot"
 ADDRESS = "C0EXAMPLE1"
@@ -2067,6 +2067,9 @@ PYTHON_CI_CHECK = "Python (ruff + mypy + pytest)"
 PYTHON_CI_PATHS = [
     "apps/api/src/curie_api/factory_ci.py",
     "apps/api/tests/test_workitem_outcomes.py",
+    "packages/test-support/factory_fixture.py",
+    "runner/tests/test_repo_toolchain_proof_ci.py",
+    "tools/verification.py",
 ]
 
 
@@ -2075,20 +2078,19 @@ def _factory_ci_detail(
     runs: list[dict[str, Any]] | None = None,
     state: str = "observed",
     reason: str | None = None,
-) -> SimpleNamespace:
+) -> Any:
     return SimpleNamespace(
         state=state,
         reason=reason,
+        head_sha=HEAD_SHA,
         check_runs=[] if runs is None else runs,
         statuses=[],
     )
 
 
 def _decide_factory_ci(
-    detail: SimpleNamespace,
+    detail: Any,
     changed_path: str,
-    *,
-    sandbox_unavailable: bool = True,
 ) -> Any:
     return factory_ci.decide(
         detail,
@@ -2097,12 +2099,11 @@ def _decide_factory_ci(
         execution_deadline=datetime(2026, 9, 24, 12, 30, tzinfo=UTC),
         ci_wait_seconds=1200,
         changed_paths=[changed_path],
-        sandbox_unavailable=sandbox_unavailable,
     )
 
 
 @pytest.mark.parametrize("changed_path", PYTHON_CI_PATHS)
-def test_sandbox_unavailable_requires_the_exact_python_ci_run(
+def test_selected_python_path_requires_the_exact_python_ci_run(
     changed_path: str,
 ) -> None:
     successful = _actions_check_run(7001, PYTHON_CI_CHECK, "success")
@@ -2132,7 +2133,7 @@ def test_sandbox_unavailable_requires_the_exact_python_ci_run(
     ids=["missing", "skipped", "neutral", "unrelated", "incomplete", "failed"],
 )
 @pytest.mark.parametrize("changed_path", PYTHON_CI_PATHS)
-def test_sandbox_unavailable_never_accepts_incomplete_python_ci_evidence(
+def test_selected_python_path_never_accepts_incomplete_python_ci_evidence(
     changed_path: str, runs: list[dict[str, Any]]
 ) -> None:
     verdict = _decide_factory_ci(_factory_ci_detail(runs=runs), changed_path)
@@ -2141,7 +2142,7 @@ def test_sandbox_unavailable_never_accepts_incomplete_python_ci_evidence(
 
 
 @pytest.mark.parametrize("changed_path", PYTHON_CI_PATHS)
-def test_sandbox_unavailable_fails_closed_when_ci_is_unreadable(
+def test_selected_python_path_fails_closed_when_ci_is_unreadable(
     changed_path: str,
 ) -> None:
     detail = _factory_ci_detail(state="unavailable", reason="github_forbidden")
@@ -2151,20 +2152,129 @@ def test_sandbox_unavailable_fails_closed_when_ci_is_unreadable(
     assert verdict.kind == "unverified"
 
 
-def test_python_check_is_not_required_when_sandbox_tools_are_available() -> None:
-    verdict = _decide_factory_ci(
-        _factory_ci_detail(), PYTHON_CI_PATHS[0], sandbox_unavailable=False
+def test_unselected_python_path_is_unverified() -> None:
+    verdict = _decide_factory_ci(_factory_ci_detail(), "examples/coder/foo.py")
+
+    assert verdict.kind == "unverified"
+    assert verdict.reason == "required_python_ci_unselected: examples/coder/foo.py"
+
+
+@pytest.mark.parametrize(
+    ("preflight", "python_check"),
+    [("missing", "success"), ("failed", "success"), ("passed", None)],
+    ids=["missing-preflight", "failed-preflight", "missing-python-check"],
+)
+def test_ci_gate_requires_unavailable_preflight_and_python_ci_for_python_changes(
+    stack: TestClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    preflight: str,
+    python_check: str | None,
+) -> None:
+    from curie_api import workitem_outcomes
+    from curie_api.factory_progress import (
+        VerificationObservation,
+        record_verification,
     )
 
-    assert verdict.kind == "no_ci"
+    agent = _agent(stack, auth_headers)
+    seeded = _completed(stack, agent)
+    if preflight != "missing":
+        observation = VerificationObservation(
+            command="uv run pytest runner/tests -q",
+            outcome="passed" if preflight == "passed" else "failed",
+            exit_status=0 if preflight == "passed" else 1,
+            missing_binaries=[],
+            blocked_services=[],
+        )
 
+        async def record(session: AsyncSession) -> Any:
+            return await record_verification(
+                session,
+                token_request_id=seeded.request_id,
+                body=observation,
+            )
 
-def test_python_check_is_not_required_for_an_unselected_ui_path() -> None:
-    verdict = _decide_factory_ci(
-        _factory_ci_detail(), "apps/ui/src/App.tsx", sandbox_unavailable=True
+        assert with_session(record).outcome == "recorded"
+
+    path = PYTHON_CI_PATHS[0]
+    patch = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n+++ b/{path}\n@@ -1 +1,2 @@\n+change\n"
+    )
+    publication = _publish(
+        stack,
+        agent["deployment_id"],
+        changed_paths=[path],
+        patch_b64=base64.b64encode(patch.encode()).decode(),
+    )
+    _resolve(stack, auth_headers, publication["approval_id"])
+    _open_pr(stack, publication["id"])
+    _execute(
+        "UPDATE curie.publications SET terminal_at = now() - interval '5 minutes' "
+        "WHERE id = :id",
+        {"id": uuid.UUID(publication["id"])},
     )
 
-    assert verdict.kind == "no_ci"
+    async def green_ci(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        return _factory_ci_detail(
+            runs=[]
+            if python_check is None
+            else [_actions_check_run(7002, PYTHON_CI_CHECK, python_check)]
+        )
+
+    monkeypatch.setattr(workitem_outcomes, "observe_ci_detail", green_ci)
+
+    async def settlement(session: AsyncSession) -> Any:
+        return await workitems.claim_publication_settlement(
+            session, exclude=frozenset()
+        )
+
+    settled = with_session(settlement)
+    assert settled is not None
+
+    class EmptyValkey:
+        async def exists(self, _key: str) -> bool:
+            return False
+
+    async def dispatch(*args: Any, **kwargs: Any) -> bool:
+        raise AssertionError("a green Python check must not enqueue a fix turn")
+
+    async def run_gate() -> str:
+        engine = create_async_engine(get_settings().database_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with httpx.AsyncClient() as client:
+                return await factory_ci.gate(
+                    maker,
+                    cast(Any, EmptyValkey()),
+                    get_settings(),
+                    client,
+                    settled,
+                    owner=OWNER,
+                    next_poll={},
+                    dispatch=dispatch,
+                    may_observe=lambda _request_id: True,
+                )
+        finally:
+            await engine.dispose()
+
+    result = asyncio.run(run_gate())
+    assert result == "settled"
+
+    async def terminal_status(session: AsyncSession) -> tuple[str, str | None]:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT status, terminal_cause FROM curie.execution_requests "
+                    "WHERE id = :id"
+                ),
+                {"id": seeded.request_id},
+            )
+        ).one()
+        return str(row.status), row.terminal_cause
+
+    assert with_session(terminal_status) == ("failed", "ci_unverified")
 
 
 @pytest.mark.parametrize(
@@ -2230,7 +2340,6 @@ def test_ci_detail_adds_a_failing_actions_log_to_the_fix_report(
         execution_deadline=datetime(2026, 9, 24, 12, 30, tzinfo=UTC),
         ci_wait_seconds=1200,
         changed_paths=[],
-        sandbox_unavailable=False,
     ).kind == "failing"
     prompt = factory_ci.continuation_text(
         f"https://github.com/{REPO}/issues/9101", PR_URL, HEAD_SHA, 2, detail
@@ -2375,7 +2484,6 @@ def test_large_actions_log_preserves_a_bounded_diagnostic_tail(
         execution_deadline=datetime(2026, 9, 24, 12, 30, tzinfo=UTC),
         ci_wait_seconds=1200,
         changed_paths=[],
-        sandbox_unavailable=False,
     ).kind == "failing"
     prompt = factory_ci.continuation_text(
         f"https://github.com/{REPO}/issues/9101", PR_URL, HEAD_SHA, 2, detail
@@ -2459,7 +2567,6 @@ def test_actions_log_over_eight_mib_is_optional_enrichment_failure(
         execution_deadline=datetime(2026, 9, 24, 12, 30, tzinfo=UTC),
         ci_wait_seconds=1200,
         changed_paths=[],
-        sandbox_unavailable=False,
     ).kind == "failing"
     prompt = factory_ci.continuation_text(
         f"https://github.com/{REPO}/issues/9101", PR_URL, HEAD_SHA, 2, detail

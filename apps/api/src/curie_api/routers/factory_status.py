@@ -28,8 +28,10 @@ from ..factory_notices import cause_text
 from ..factory_progress import (
     PROGRESS_SCOPE,
     ProgressReport,
+    VerificationObservation,
     phase_view,
     record_report,
+    record_verification,
 )
 from ..models import (
     ExecutionRequest,
@@ -55,6 +57,7 @@ _STATUS_CODES = {
     "no_active_request": status.HTTP_409_CONFLICT,
     "declaration_changed": status.HTTP_409_CONFLICT,
     "report_limit": status.HTTP_429_TOO_MANY_REQUESTS,
+    "verification_exists": status.HTTP_409_CONFLICT,
 }
 
 
@@ -82,6 +85,22 @@ async def report_work_item_progress(
     request_id: uuid.UUID, body: ProgressReport, session: SessionDep
 ) -> Any:
     result = await record_report(session, token_request_id=request_id, body=body)
+    if result.outcome != "recorded":
+        return JSONResponse(
+            status_code=_STATUS_CODES[result.outcome], content={"code": result.outcome}
+        )
+    return {"recorded": True, "request_id": str(result.request_id)}
+
+
+@router.post(
+    "/v1/work-item-progress/{request_id}/verification",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_progress_token)],
+)
+async def report_work_item_verification(
+    request_id: uuid.UUID, body: VerificationObservation, session: SessionDep
+) -> Any:
+    result = await record_verification(session, token_request_id=request_id, body=body)
     if result.outcome != "recorded":
         return JSONResponse(
             status_code=_STATUS_CODES[result.outcome], content={"code": result.outcome}

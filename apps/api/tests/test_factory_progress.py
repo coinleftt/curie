@@ -80,6 +80,7 @@ ACTIVITY: dict[str, Any] = {
     "tool_calls": 37,
     "last_tool": "Bash",
 }
+VERIFICATION_COMMAND = "uv run pytest runner/tests -q"
 
 
 def progress_token(
@@ -425,16 +426,25 @@ def test_a_token_whose_work_item_has_no_active_request_is_409(admitted: Any) -> 
     "observation",
     [
         {
-            "command": "uv --version",
-            "outcome": "available",
+            "command": VERIFICATION_COMMAND,
+            "outcome": "passed",
+            "exit_status": 0,
             "missing_binaries": [],
             "blocked_services": [],
         },
         {
-            "command": "uv --version",
+            "command": VERIFICATION_COMMAND,
             "outcome": "unavailable",
+            "exit_status": None,
             "missing_binaries": ["uv"],
-            "blocked_services": ["postgres"],
+            "blocked_services": [],
+        },
+        {
+            "command": VERIFICATION_COMMAND,
+            "outcome": "failed",
+            "exit_status": 1,
+            "missing_binaries": [],
+            "blocked_services": [],
         },
     ],
 )
@@ -481,8 +491,9 @@ def test_verification_token_is_bound_to_the_path_request(admitted: Any) -> None:
     _label(client, github, second_number)
     second = _request(second_number)["id"]
     observation = {
-        "command": "uv --version",
-        "outcome": "available",
+        "command": VERIFICATION_COMMAND,
+        "outcome": "passed",
+        "exit_status": 0,
         "missing_binaries": [],
         "blocked_services": [],
     }
@@ -499,49 +510,107 @@ def test_verification_token_is_bound_to_the_path_request(admitted: Any) -> None:
 @pytest.mark.parametrize(
     "observation",
     [
-        {"outcome": "available", "missing_binaries": [], "blocked_services": []},
+        {
+            "outcome": "passed",
+            "exit_status": 0,
+            "missing_binaries": [],
+            "blocked_services": [],
+        },
         {
             "command": "   ",
-            "outcome": "available",
+            "outcome": "passed",
+            "exit_status": 0,
             "missing_binaries": [],
             "blocked_services": [],
         },
         {
-            "command": "uv --version",
+            "command": "uv run pytest -q",
+            "outcome": "passed",
+            "exit_status": 0,
+            "missing_binaries": [],
+            "blocked_services": [],
+        },
+        {
+            "command": VERIFICATION_COMMAND,
             "outcome": "unknown",
+            "exit_status": None,
             "missing_binaries": [],
             "blocked_services": [],
         },
         {
-            "command": "uv --version",
-            "outcome": "available",
+            "command": VERIFICATION_COMMAND,
+            "outcome": "passed",
+            "exit_status": 1,
+            "missing_binaries": [],
+            "blocked_services": [],
+        },
+        {
+            "command": VERIFICATION_COMMAND,
+            "outcome": "passed",
+            "exit_status": 0,
             "missing_binaries": ["uv"],
             "blocked_services": [],
         },
         {
-            "command": "uv --version",
+            "command": VERIFICATION_COMMAND,
             "outcome": "unavailable",
+            "exit_status": 127,
+            "missing_binaries": ["uv"],
+            "blocked_services": [],
+        },
+        {
+            "command": VERIFICATION_COMMAND,
+            "outcome": "failed",
+            "exit_status": None,
             "missing_binaries": [],
             "blocked_services": [],
         },
         {
-            "command": "uv --version",
+            "command": VERIFICATION_COMMAND,
+            "outcome": "failed",
+            "exit_status": 0,
+            "missing_binaries": [],
+            "blocked_services": [],
+        },
+        {
+            "command": VERIFICATION_COMMAND,
             "outcome": "unavailable",
+            "exit_status": None,
             "missing_binaries": ["uv", "uv"],
             "blocked_services": [],
         },
         {
-            "command": "uv --version",
+            "command": VERIFICATION_COMMAND,
             "outcome": "unavailable",
+            "exit_status": None,
             "missing_binaries": [],
             "blocked_services": ["postgres", "postgres"],
         },
         {
-            "command": "uv --version",
-            "outcome": "available",
+            "command": VERIFICATION_COMMAND,
+            "outcome": "passed",
+            "exit_status": 0,
             "missing_binaries": [],
             "blocked_services": [],
             "model_result": "pretend success",
+        },
+        {
+            "command": VERIFICATION_COMMAND,
+            "outcome": "passed",
+            "missing_binaries": [],
+            "blocked_services": [],
+        },
+        {
+            "command": VERIFICATION_COMMAND,
+            "outcome": "passed",
+            "exit_status": 0,
+            "blocked_services": [],
+        },
+        {
+            "command": VERIFICATION_COMMAND,
+            "outcome": "passed",
+            "exit_status": 0,
+            "missing_binaries": [],
         },
     ],
 )
@@ -567,14 +636,16 @@ def test_duplicate_verification_does_not_replace_the_first_observation(
     _label(client, github, number)
     request_id = _request(number)["id"]
     first_observation = {
-        "command": "uv --version",
+        "command": VERIFICATION_COMMAND,
         "outcome": "unavailable",
+        "exit_status": None,
         "missing_binaries": ["uv"],
         "blocked_services": [],
     }
     second_observation = {
-        "command": "uv --version",
-        "outcome": "available",
+        "command": VERIFICATION_COMMAND,
+        "outcome": "passed",
+        "exit_status": 0,
         "missing_binaries": [],
         "blocked_services": [],
     }
@@ -608,8 +679,9 @@ def test_a_stale_request_cannot_record_verification_for_its_replacement(
     assert [row["status"] for row in rows] == ["failed", "waiting"]
     second = rows[1]["id"]
     observation = {
-        "command": "uv --version",
+        "command": VERIFICATION_COMMAND,
         "outcome": "unavailable",
+        "exit_status": None,
         "missing_binaries": ["uv"],
         "blocked_services": [],
     }
