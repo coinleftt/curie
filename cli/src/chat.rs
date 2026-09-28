@@ -382,7 +382,7 @@ pub const TURN_FAILURE_REPLY_PREFIX: &str = "curie-turn-failure:";
 /// failed turn. Only a first line of `curie-turn-failure: <token>` counts. A
 /// later mention, or a token that contains whitespace, is model text.
 pub fn failure_class_from_reply(text: &str) -> Option<&str> {
-    let line = text.lines().next()?.trim();
+    let line = text.trim_start_matches('\n').lines().next()?.trim();
     let rest = line.strip_prefix(TURN_FAILURE_REPLY_PREFIX)?.trim();
     if rest.is_empty() || rest.split_whitespace().nth(1).is_some() {
         return None;

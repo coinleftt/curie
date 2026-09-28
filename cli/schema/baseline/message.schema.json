@@ -31,7 +31,7 @@
     },
     {
       "title": "failed-turn",
-      "description": "A failed runner turn whose delivered reply exposes the failure. `failed` is true, `failure_class` is the platform classification token, and `reply` is the delivered text (its first line is `curie-turn-failure: <failure_class>`). `finalized` is false so a consumer that treats a finalized reply as task success cannot score this turn as successful. The process exits 1.",
+      "description": "A failed runner turn whose delivered reply exposes the failure. `failed` is true and `failure_class` is the platform classification token. When the worker wrote the marker, `reply` starts with `curie-turn-failure: <failure_class>`; an escalation that arrived without that marker still uses this shape with class `unclassified`. `finalized` is false so a consumer that treats a finalized reply as task success cannot score this turn as successful. The process exits 1.",
       "type": "object",
       "additionalProperties": false,
       "required": [

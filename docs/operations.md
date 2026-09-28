@@ -1018,6 +1018,11 @@ classified run failure: `model_credit_exhausted`, `model_credential_rejected`,
 class, the next line is `Failure class:` and that token. The same token is the
 first line of the channel reply, `curie-turn-failure: <class>`, so a consumer
 that sees only the delivered text can tell the turn from a successful reply.
+Other escalations use that same first line with their own token
+(`delivery-deadline`, `prior-side-effect`, `approval-route-unbound`,
+`approval-backend-missing`, `publication-unavailable`, or
+`approval-create-failed`). A failed run whose cause is `runner_escalated`,
+`unclassified`, `max_turns`, or `ci_failed` still shows as needing a person.
 A history capacity result tells the
 operator to inspect work already done and retry. A model provider that answers
 HTTP 402 or reports exhausted
