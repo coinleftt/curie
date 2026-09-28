@@ -313,6 +313,7 @@ fn message_outcome_declared_variants() -> BTreeSet<String> {
 fn message_outcome_variant_name(value: &MessageOutcomeOutput) -> &'static str {
     match value {
         MessageOutcomeOutput::Replied { .. } => "Replied",
+        MessageOutcomeOutput::Failed { .. } => "Failed",
         MessageOutcomeOutput::NoEdit { .. } => "NoEdit",
         MessageOutcomeOutput::AwaitingApproval { .. } => "AwaitingApproval",
         MessageOutcomeOutput::TimedOut { .. } => "TimedOut",
@@ -340,6 +341,11 @@ fn message_outcome_samples() -> Vec<MessageOutcomeOutput> {
         MessageOutcomeOutput::Replied {
             thread: "1700000000.000100".to_string(),
             reply: "the answer is 42".to_string(),
+        },
+        MessageOutcomeOutput::Failed {
+            thread: "1700000000.000100".to_string(),
+            reply: "curie-turn-failure: max-turns\n\nThe run failed (max-turns).".to_string(),
+            failure_class: "max-turns".to_string(),
         },
         MessageOutcomeOutput::NoEdit {
             thread: "1700000000.000100".to_string(),

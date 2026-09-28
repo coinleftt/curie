@@ -981,8 +981,9 @@ operators raise the delivery budget for factory agents.
 
 A work item run boots its runner with a turn budget of `worker.workItemMaxTurns`
 (default 1000), so the deadline rather than the runner's default of 20 turns
-bounds it. A run that still exhausts its turns fails as `runner_escalated` with
-the classification `max-turns`.
+bounds it. A run that still exhausts its turns fails as `max_turns` with
+failure class `max-turns`. An unclassified runner failure fails as
+`unclassified`.
 
 Capacity wait expiry is visible as `expired` / `capacity_wait_expired` on
 `GET /v1/internal/work-items/requests/{id}`. It is not written to the
@@ -1008,11 +1009,16 @@ once more in the same session. If it still does not publish, it ends as
 final reply, redacted and shown inside a code fence so none of it renders.
 A last `Cause:` line names the platform cause code
 (`capacity_wait_expired`, `execution_deadline`, `issue_cancelled`,
-`owner_lost`, `runner_escalated`, `runner_failed`, `no_pull_request`,
+`owner_lost`, `runner_escalated`, `unclassified`, `max_turns`, `runner_failed`,
+`no_pull_request`,
 `early_stop`, `publication_denied`, `publication_expired`, `publication_failed`, or a
 classified run failure: `model_credit_exhausted`, `model_credential_rejected`,
 `model_rate_limited`, `model_error`, `budget_exceeded`, `runner_timeout`,
-`workspace_error`, or `history_capacity`). A history capacity result tells the
+`workspace_error`, or `history_capacity`). When the cause has a runner failure
+class, the next line is `Failure class:` and that token. The same token is the
+first line of the channel reply, `curie-turn-failure: <class>`, so a consumer
+that sees only the delivered text can tell the turn from a successful reply.
+A history capacity result tells the
 operator to inspect work already done and retry. A model provider that answers
 HTTP 402 or reports exhausted
 credits ends the run as `model_credit_exhausted` without retrying. A run that a
