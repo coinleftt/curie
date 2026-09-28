@@ -168,8 +168,10 @@ model reads, not a list the platform matches against.
 - Each channel's memory gets its own storage scope, using the existing
   `binding_scope` column, so each has its own size limit instead of all
   channels sharing one agent-wide limit.
-- The guidance and the on switch are operator settings on the agent, set with
-  `curie cluster agent` like its model and thinking. The guidance is stored as
+- The guidance and the on switch are operator settings on the agent. The switch
+  is `curie cluster overrides <agent> --memory-writes on|off`, beside the
+  model and thinking overrides; the guidance is `curie cluster memory <agent>
+  --guidance`, `--guidance-from <file>` and `--reset-guidance`. The guidance is stored as
   one key in the agent's memory, which the runner already reads at boot, so it
   needs no contract change. A bundle can't ship guidance with the bot; a
   bundle-level default can be added later between the platform default and an
