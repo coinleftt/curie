@@ -5140,6 +5140,11 @@ async fn prepare_deploy_with_commit_sha(
     // long before anything is applied. `opts.plugin_dir` (not the canonicalized
     // copy) is the path they typed.
     let connector_decl = crate::connector_build::load(&plugin_dir)?;
+    if let Some(warning) =
+        crate::connector_build::undeclared_runner_dockerfile(&opts.plugin_dir, &connector_decl)
+    {
+        crate::ui::ui().warn(&warning);
+    }
     if opts.tier == DeployTier::Local
         && connector_decl
             .connectors
