@@ -530,6 +530,8 @@ banner "PRE-BIND: must stay unavailable until the server binds"
 # Poll budget comes from the server sleep (startedAt + BIND_DELAY), counted
 # with this shell's SECONDS. Do not compare date +%s to the kubelet clock:
 # skew either ends the window before a sample or holds it open past the bind.
+# The window can start a few seconds after the kubelet start. The Ready
+# timestamp check below is what proves the probe did not pass early.
 prebind_window=$(( BIND_DELAY - POLL_SECONDS ))
 prebind_mark=$SECONDS
 prebind_samples=0
@@ -567,7 +569,8 @@ kc rollout status "deployment/$DEPLOYMENT" -n "$NAMESPACE" --timeout=180s \
   || fail "connector Deployment is Available but reports $(deployment_available) available replicas"
 [[ "$(deployment_condition Available)" == "True" ]] \
   || fail "connector Deployment condition Available is not True after the bind"
-(( "$(ready_endpoint_count)" > 0 )) \
+bound_endpoints="$(ready_endpoint_count)"
+(( bound_endpoints > 0 )) \
   || fail "connector Service has no ready endpoints after the rollout"
 
 READY_AT="$(pod_jsonpath "$NEW_POD" \
@@ -597,6 +600,10 @@ CLUSTER_IP="$(kc get service "$SERVICE" -n "$NAMESPACE" \
   -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
 [[ -n "$CLUSTER_IP" ]] || fail "could not read the connector Service ClusterIP"
 
+# Numeric uids are required. runAsNonRoot with a named image user makes the
+# kubelet refuse the pod (it cannot prove the name is not root). Observed
+# 2026-09-28: hashicorp/http-echo:1.0 is uid 65532; curlimages/curl:8.10.1
+# is uid 100 (curl_user) gid 101 (curl_group).
 kc apply -n "$NAMESPACE" -f - >/dev/null <<YAML
 apiVersion: v1
 kind: Pod
@@ -608,6 +615,8 @@ spec:
   restartPolicy: Never
   securityContext:
     runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
     seccompProfile:
       type: RuntimeDefault
   containers:
@@ -632,6 +641,8 @@ spec:
   restartPolicy: Never
   securityContext:
     runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
     seccompProfile:
       type: RuntimeDefault
   containers:
@@ -658,6 +669,8 @@ spec:
   restartPolicy: Never
   securityContext:
     runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
     seccompProfile:
       type: RuntimeDefault
   containers:
