@@ -264,7 +264,7 @@ pub fn clear_commands(
 
 /// Replace the agent's claimed sandboxes so the next turn starts a fresh pod
 /// with the newly deployed bundle and re-resolved secretKeyRef env.
-fn retire_claims_command(namespace: &str, agent: &str) -> OpsCommand {
+pub(crate) fn retire_claims_command(namespace: &str, agent: &str) -> OpsCommand {
     OpsCommand::new(
         "kubectl",
         vec![
