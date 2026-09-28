@@ -208,17 +208,16 @@ def test_python_ci_job_runs_exact_gate_before_dev_stack() -> None:
     assert len(matching_steps) == 1
     assert matching_steps[0]["name"] == "Alembic revision gate"
 
-    gate_index = steps.index(matching_steps[0])
-    stack_index = next(
-        index for index, step in enumerate(steps) if step.get("name") == "Start dev stack"
-    )
-    assert gate_index < stack_index
+    # The dev stack boots only in the pytest shards, so the gate never waits on
+    # one in the required Python job.
+    assert not any(step.get("name") == "Start dev stack" for step in steps)
 
 
 def test_python_ci_runs_released_upgrade_after_stack_ready_and_before_fresh_install(
 ) -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yaml").read_text())
-    steps = workflow["jobs"]["python"]["steps"]
+    # Every pytest shard boots its own stack and runs the gate against it.
+    steps = workflow["jobs"]["python-pytest"]["steps"]
 
     checkout_steps = [
         step for step in steps if step.get("uses") == "actions/checkout@v7"
