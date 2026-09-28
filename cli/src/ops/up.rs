@@ -4924,26 +4924,34 @@ mod tests {
 
     use crate::ops::testsupport::*;
 
+    fn opts() -> UpOpts {
+        UpOpts {
+            retained_mail_values: None,
+            common: common(),
+            chart: "charts/curie".into(),
+            no_expose: true,
+            set: vec![],
+            set_string: vec![],
+            allow_egress_host: vec![],
+            resolved_egress_cidrs: vec![],
+            allow_web_egress: vec![],
+            fake_model: false,
+            credentials: None,
+            local_model: None,
+            model: None,
+            secrets: vec![],
+            github_token: GithubTokenPlan::Untouched,
+            dev: false,
+            adopt: false,
+        }
+    }
+
     fn mail_upgrade_opts(existing: &serde_json::Value, set: Vec<String>) -> UpOpts {
         complete_up_opts_without_runner_egress(
             UpOpts {
-                retained_mail_values: None,
-                common: common(),
-                chart: "charts/curie".into(),
-                no_expose: true,
                 set,
-                set_string: vec![],
-                allow_egress_host: vec![],
-                resolved_egress_cidrs: vec![],
-                allow_web_egress: vec![],
-                fake_model: false,
-                credentials: None,
-                local_model: None,
-                model: None,
-                secrets: vec![],
-                github_token: GithubTokenPlan::Untouched,
                 dev: true,
-                adopt: false,
+                ..opts()
             },
             Some(existing),
             None,
@@ -5124,23 +5132,8 @@ mod tests {
     #[test]
     fn up_defaults_expose_ui_and_langfuse() {
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
             no_expose: false,
-            set: vec![],
-            set_string: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
+            ..opts()
         });
         assert_eq!(cmds.len(), 1);
         let line = cmds[0].display();
@@ -5169,23 +5162,8 @@ mod tests {
         });
         let opts = complete_up_opts_without_runner_egress(
             UpOpts {
-                retained_mail_values: None,
-                common: common(),
-                github_token: GithubTokenPlan::Untouched,
-                allow_egress_host: vec![],
-                resolved_egress_cidrs: vec![],
-                chart: "charts/curie".into(),
-                secrets: vec![],
-                dev: false,
-                adopt: false,
                 no_expose: false,
-                set: vec![],
-                set_string: vec![],
-                allow_web_egress: vec![],
-                fake_model: false,
-                credentials: None,
-                local_model: None,
-                model: None,
+                ..opts()
             },
             Some(&existing),
             None,
@@ -5225,26 +5203,11 @@ mod tests {
         });
         let opts = complete_up_opts_without_runner_egress(
             UpOpts {
-                retained_mail_values: None,
-                common: common(),
-                github_token: GithubTokenPlan::Untouched,
-                allow_egress_host: vec![],
-                resolved_egress_cidrs: vec![],
-                chart: "charts/curie".into(),
-                secrets: vec![],
-                dev: false,
-                adopt: false,
-                no_expose: true,
-                set: vec![],
                 set_string: vec![
                     "worker.extraEnv[0].name=OPERATOR_PROVIDER_BASE_URL".into(),
                     "worker.extraEnv[0].value=https://operator.example.com/v1".into(),
                 ],
-                allow_web_egress: vec![],
-                fake_model: false,
-                credentials: None,
-                local_model: None,
-                model: None,
+                ..opts()
             },
             Some(&existing),
             None,
@@ -5280,32 +5243,9 @@ mod tests {
                 }]
             }
         });
-        let opts = complete_up_opts_without_runner_egress(
-            UpOpts {
-                retained_mail_values: None,
-                common: common(),
-                github_token: GithubTokenPlan::Untouched,
-                allow_egress_host: vec![],
-                resolved_egress_cidrs: vec![],
-                chart: "charts/curie".into(),
-                secrets: vec![],
-                dev: false,
-                adopt: false,
-                no_expose: true,
-                set: vec![],
-                set_string: vec![],
-                allow_web_egress: vec![],
-                fake_model: false,
-                credentials: None,
-                local_model: None,
-                model: None,
-            },
-            Some(&existing),
-            None,
-            false,
-            true,
-        )
-        .unwrap();
+        let opts =
+            complete_up_opts_without_runner_egress(opts(), Some(&existing), None, false, true)
+                .unwrap();
 
         assert_eq!(
             up_value_plan(&opts)
@@ -5344,32 +5284,9 @@ mod tests {
                 }
             }
         });
-        let opts = complete_up_opts_without_runner_egress(
-            UpOpts {
-                common: common(),
-                github_token: GithubTokenPlan::Untouched,
-                allow_egress_host: vec![],
-                resolved_egress_cidrs: vec![],
-                chart: "charts/curie".into(),
-                secrets: vec![],
-                retained_mail_values: None,
-                dev: false,
-                adopt: false,
-                no_expose: true,
-                set: vec![],
-                set_string: vec![],
-                allow_web_egress: vec![],
-                fake_model: false,
-                credentials: None,
-                local_model: None,
-                model: None,
-            },
-            Some(&existing),
-            None,
-            false,
-            true,
-        )
-        .unwrap();
+        let opts =
+            complete_up_opts_without_runner_egress(opts(), Some(&existing), None, false, true)
+                .unwrap();
 
         let effective = up_value_plan(&opts).effective_values();
         assert_eq!(
@@ -5429,32 +5346,9 @@ mod tests {
         let existing = serde_json::json!({
             "worker": { "slackTrustedOrigins": "http://host.docker.internal" }
         });
-        let opts = complete_up_opts_without_runner_egress(
-            UpOpts {
-                retained_mail_values: None,
-                common: common(),
-                github_token: GithubTokenPlan::Untouched,
-                allow_egress_host: vec![],
-                resolved_egress_cidrs: vec![],
-                chart: "charts/curie".into(),
-                secrets: vec![],
-                dev: false,
-                adopt: false,
-                no_expose: true,
-                set: vec![],
-                set_string: vec![],
-                allow_web_egress: vec![],
-                fake_model: false,
-                credentials: None,
-                local_model: None,
-                model: None,
-            },
-            Some(&existing),
-            None,
-            false,
-            true,
-        )
-        .unwrap();
+        let opts =
+            complete_up_opts_without_runner_egress(opts(), Some(&existing), None, false, true)
+                .unwrap();
 
         let (materialized, _guards) = up_commands(&opts)[0].materialize_secret_files().unwrap();
         let argv = materialized.argv().join(" ");
@@ -5478,23 +5372,8 @@ mod tests {
         });
         let opts = complete_up_opts_without_runner_egress(
             UpOpts {
-                retained_mail_values: None,
-                common: common(),
-                github_token: GithubTokenPlan::Untouched,
-                allow_egress_host: vec![],
-                resolved_egress_cidrs: vec![],
-                chart: "charts/curie".into(),
-                secrets: vec![],
-                dev: false,
-                adopt: false,
-                no_expose: true,
-                set: vec![],
                 set_string: vec!["worker.slackTrustedOrigins=https://trusted.example.com".into()],
-                allow_web_egress: vec![],
-                fake_model: false,
-                credentials: None,
-                local_model: None,
-                model: None,
+                ..opts()
             },
             Some(&existing),
             None,
@@ -5525,23 +5404,8 @@ mod tests {
         });
         let opts = complete_up_opts_without_runner_egress(
             UpOpts {
-                retained_mail_values: None,
-                common: common(),
-                github_token: GithubTokenPlan::Untouched,
-                allow_egress_host: vec![],
-                resolved_egress_cidrs: vec![],
-                chart: "charts/curie".into(),
-                secrets: vec![],
-                dev: false,
-                adopt: false,
-                no_expose: true,
                 set: vec!["worker.slackTrustedOrigins=https://trusted.example.com".into()],
-                set_string: vec![],
-                allow_web_egress: vec![],
-                fake_model: false,
-                credentials: None,
-                local_model: None,
-                model: None,
+                ..opts()
             },
             Some(&existing),
             None,
@@ -5571,32 +5435,9 @@ mod tests {
         let existing = serde_json::json!({
             "worker": { "slackTrustedOrigins": recorded }
         });
-        let opts = complete_up_opts_without_runner_egress(
-            UpOpts {
-                retained_mail_values: None,
-                common: common(),
-                github_token: GithubTokenPlan::Untouched,
-                allow_egress_host: vec![],
-                resolved_egress_cidrs: vec![],
-                chart: "charts/curie".into(),
-                secrets: vec![],
-                dev: false,
-                adopt: false,
-                no_expose: true,
-                set: vec![],
-                set_string: vec![],
-                allow_web_egress: vec![],
-                fake_model: false,
-                credentials: None,
-                local_model: None,
-                model: None,
-            },
-            Some(&existing),
-            None,
-            false,
-            true,
-        )
-        .unwrap();
+        let opts =
+            complete_up_opts_without_runner_egress(opts(), Some(&existing), None, false, true)
+                .unwrap();
 
         assert_eq!(
             up_value_plan(&opts)
@@ -5630,25 +5471,7 @@ mod tests {
             None,
         ] {
             let opts = complete_up_opts_without_runner_egress(
-                UpOpts {
-                    retained_mail_values: None,
-                    common: common(),
-                    github_token: GithubTokenPlan::Untouched,
-                    allow_egress_host: vec![],
-                    resolved_egress_cidrs: vec![],
-                    chart: "charts/curie".into(),
-                    secrets: vec![],
-                    dev: false,
-                    adopt: false,
-                    no_expose: true,
-                    set: vec![],
-                    set_string: vec![],
-                    allow_web_egress: vec![],
-                    fake_model: false,
-                    credentials: None,
-                    local_model: None,
-                    model: None,
-                },
+                opts(),
                 existing.as_ref(),
                 None,
                 false,
@@ -5708,23 +5531,9 @@ mod tests {
     ) -> UpOpts {
         complete_up_opts_without_runner_egress(
             UpOpts {
-                retained_mail_values: None,
-                common: common(),
-                github_token: GithubTokenPlan::Untouched,
-                allow_egress_host: vec![],
-                resolved_egress_cidrs: vec![],
-                chart: "charts/curie".into(),
-                secrets: vec![],
-                dev: false,
-                adopt: false,
-                no_expose: true,
                 set,
                 set_string,
-                allow_web_egress: vec![],
-                fake_model: false,
-                credentials: None,
-                local_model: None,
-                model: None,
+                ..opts()
             },
             existing,
             None,
@@ -5878,25 +5687,7 @@ mod tests {
 
     #[test]
     fn up_no_expose_drops_the_nodeport_sets() {
-        let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            set_string: vec![],
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
-        });
+        let cmds = up_commands(&opts());
         let line = cmds[0].display();
         assert!(!line.contains("NodePort"), "{line}");
         assert!(line.ends_with("--create-namespace"), "{line}");
@@ -5905,23 +5696,8 @@ mod tests {
     #[test]
     fn up_passthrough_set_is_appended_verbatim() {
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: true,
             set: vec!["worker.replicas=2".into(), "dispatcher.deploy=false".into()],
-            set_string: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(
@@ -5935,23 +5711,8 @@ mod tests {
         // No credential and not --fake-model: a plain install with no real-model
         // or egress sets (the fake model stays on, egress stays fail-closed).
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            set_string: vec![],
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
             no_expose: false,
-            set: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(!line.contains("agentSandbox.runner.fakeModel"), "{line}");
@@ -5964,23 +5725,9 @@ mod tests {
         // --fake-model resolves to no credential, so the argv is the sealed
         // install even when the caller had a credential in the environment.
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
             no_expose: false,
-            set: vec![],
-            set_string: vec![],
-            allow_web_egress: vec![],
             fake_model: true,
-            credentials: None,
-            local_model: None,
-            model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(!line.contains("agentSandbox.runner"), "{line}");
@@ -5990,23 +5737,11 @@ mod tests {
     #[test]
     fn up_with_credentials_enables_real_model_and_masks() {
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            set_string: vec![],
+            no_expose: false,
             allow_egress_host: vec!["anthropic".into()],
             resolved_egress_cidrs: vec!["192.0.2.10/32".into()],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: false,
-            set: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
             credentials: Some("sk-ant-secretsecret".into()),
-            local_model: None,
-            model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(
@@ -6099,23 +5834,8 @@ mod tests {
     #[test]
     fn up_local_model_adds_inference_sets() {
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            set_string: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
             local_model: Some("qwen3:4b".into()),
-            model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(line.contains("--set inference.deploy=true"), "{line}");
@@ -6124,25 +5844,7 @@ mod tests {
 
     #[test]
     fn up_without_local_model_omits_inference_sets() {
-        let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            set_string: vec![],
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
-        });
+        let cmds = up_commands(&opts());
         let line = cmds[0].display();
         assert!(!line.contains("inference.deploy"), "{line}");
         assert!(!line.contains("inference.model"), "{line}");
@@ -6152,23 +5854,8 @@ mod tests {
     fn up_defaults_runner_model_from_env() {
         // CURIE_MODEL set, no explicit --set: inject the runner model (#361).
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            set_string: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
             model: Some("z-ai/glm-5.2".into()),
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(
@@ -6180,25 +5867,7 @@ mod tests {
     #[test]
     fn up_without_env_model_omits_runner_model_set() {
         // No CURIE_MODEL: inject nothing, the chart default stands (#361).
-        let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            set_string: vec![],
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
-        });
+        let cmds = up_commands(&opts());
         let line = cmds[0].display();
         assert!(!line.contains("agentSandbox.runner.model="), "{line}");
     }
@@ -6208,23 +5877,9 @@ mod tests {
         // CURIE_MODEL set AND an explicit matching --set: the operator's set
         // already carries it, so no duplicate injection (#361).
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: true,
             set: vec!["agentSandbox.runner.model=z-ai/glm-5.2".into()],
-            set_string: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
             model: Some("z-ai/glm-5.2".into()),
+            ..opts()
         });
         let line = cmds[0].display();
         assert_eq!(
@@ -6241,23 +5896,9 @@ mod tests {
         // `--set` must be detected so `up` does not inject a redundant
         // `--set agentSandbox.runner.model=<model>` on top of it (#361).
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            set_string: vec![],
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: true,
             set: vec!["worker.replicas=2,agentSandbox.runner.model=glm".into()],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
             model: Some("glm".into()),
+            ..opts()
         });
         let line = cmds[0].display();
         assert_eq!(
@@ -6270,23 +5911,12 @@ mod tests {
     #[test]
     fn up_opens_web_egress_after_model() {
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
+            no_expose: false,
             allow_egress_host: vec!["anthropic".into()],
             resolved_egress_cidrs: vec!["192.0.2.10/32".into()],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: false,
-            set: vec![],
-            set_string: vec![],
             allow_web_egress: vec!["203.0.113.0/24".into()],
-            fake_model: false,
             credentials: Some("sk-ant-secretsecret".into()),
-            local_model: None,
-            model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(
@@ -6310,23 +5940,10 @@ mod tests {
     #[test]
     fn up_web_egress_without_model_uses_index_zero() {
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            set_string: vec![],
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
             no_expose: false,
-            set: vec![],
             allow_web_egress: vec!["0.0.0.0/0".into()],
             fake_model: true,
-            credentials: None,
-            local_model: None,
-            model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(!line.contains("160.79.104.0/23"), "{line}");
@@ -6347,23 +5964,12 @@ mod tests {
     #[test]
     fn up_web_egress_multiple_cidrs_contiguous() {
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
+            no_expose: false,
             allow_egress_host: vec!["anthropic".into()],
             resolved_egress_cidrs: vec!["192.0.2.10/32".into()],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: false,
-            set: vec![],
-            set_string: vec![],
             allow_web_egress: vec!["203.0.113.0/24".into(), "198.51.100.0/24".into()],
-            fake_model: false,
             credentials: Some("sk-ant-secretsecret".into()),
-            local_model: None,
-            model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(
@@ -6383,45 +5989,16 @@ mod tests {
     #[test]
     fn up_no_web_egress_stays_sealed() {
         let sealed_cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            set_string: vec![],
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
             no_expose: false,
-            set: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
+            ..opts()
         });
         let sealed_line = sealed_cmds[0].display();
         assert!(!sealed_line.contains("allowedEgress"), "{sealed_line}");
 
         let model_cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
             no_expose: false,
-            set: vec![],
-            set_string: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
             credentials: Some("sk-ant-secretsecret".into()),
-            local_model: None,
-            model: None,
+            ..opts()
         });
         let model_line = model_cmds[0].display();
         assert!(!model_line.contains("allowedEgress[1]"), "{model_line}");
@@ -6630,26 +6207,11 @@ mod tests {
         // live credential, so it must land in the private -f file like any other
         // secret and never appear in argv or the printed line.
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            set_string: vec![],
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
             secrets: vec![(
                 "dispatcher.slack.botToken".into(),
                 "xoxb-preserved-secret".into(),
             )],
-            dev: false,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(!line.contains("xoxb-preserved-secret"), "leaked: {line}");
@@ -6815,23 +6377,9 @@ mod tests {
     fn completed_dev_up(existing: Option<&serde_json::Value>, set: Vec<String>) -> UpOpts {
         complete_up_opts_without_runner_egress(
             UpOpts {
-                common: common(),
-                github_token: GithubTokenPlan::Untouched,
-                allow_egress_host: vec![],
-                resolved_egress_cidrs: vec![],
-                chart: "charts/curie".into(),
-                secrets: vec![],
-                retained_mail_values: None,
-                dev: true,
-                adopt: false,
-                no_expose: true,
                 set,
-                set_string: vec![],
-                allow_web_egress: vec![],
-                fake_model: false,
-                credentials: None,
-                local_model: None,
-                model: None,
+                dev: true,
+                ..opts()
             },
             existing,
             None,
@@ -6977,12 +6525,6 @@ mod tests {
         // Success criterion: a missing secret's generated value lands in the
         // private -f values file, never in the executed argv / process table.
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
             secrets: vec![
                 ("api.apiKey".into(), "generated-api-key".into()),
                 (
@@ -6990,16 +6532,7 @@ mod tests {
                     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef0".into(),
                 ),
             ],
-            dev: false,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            set_string: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
+            ..opts()
         });
         // Printed form masks the values and shows the -f secret values file.
         let line = cmds[0].display();
@@ -7035,23 +6568,8 @@ mod tests {
         // The pure builder with no supplied secrets (the --dev path, and every
         // pre-#196 argv test) emits no secret values file.
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            set_string: vec![],
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
             dev: true,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
+            ..opts()
         });
         assert!(!cmds[0].display().contains("secret values file"));
     }
@@ -7063,23 +6581,8 @@ mod tests {
         // to helm (issue #195). Without it the sealed chart generates strong
         // random values and the dev/e2e stack would not match compose.
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
             dev: true,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            set_string: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(
@@ -7092,25 +6595,7 @@ mod tests {
     fn up_without_dev_omits_allow_dev_defaults_flag() {
         // The default (non-dev) path must NOT opt into the published defaults;
         // the sealed chart generates strong per-release credentials there.
-        let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            set_string: vec![],
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
-        });
+        let cmds = up_commands(&opts());
         let line = cmds[0].display();
         assert!(
             !line.contains("security.allowDevDefaults"),
@@ -7145,23 +6630,11 @@ mod tests {
         // Resolved provider CIDRs take the first slots (in order), then declared
         // web destinations continue contiguously -- one array, no gaps.
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            model: None,
             allow_egress_host: vec!["anthropic".into()],
             resolved_egress_cidrs: vec!["10.0.0.1/32".into(), "2001:db8::1/128".into()],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            set_string: vec![],
             allow_web_egress: vec!["203.0.113.0/24".into()],
-            fake_model: false,
             credentials: Some("sk-ant-secretsecret".into()),
-            local_model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         // Provider CIDRs occupy [0] and [1], each with the shared TCP/443 shape.
@@ -7197,23 +6670,8 @@ mod tests {
         // unconditional Anthropic carve-out is removed entirely (#362). The
         // sandbox stays sealed and the model is unreachable by design.
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            model: None,
-            set_string: vec![],
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
             credentials: Some("sk-ant-secretsecret".into()),
-            local_model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         // Real model still enabled and the credential still delivered by file.
@@ -7232,23 +6690,9 @@ mod tests {
         // Existing behavior preserved: with no credential and no provider host,
         // a declared web destination still occupies index [0].
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            model: None,
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: false,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            set_string: vec![],
             allow_web_egress: vec!["203.0.113.0/24".into()],
             fake_model: true,
-            credentials: None,
-            local_model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(
@@ -7522,23 +6966,9 @@ mod tests {
         // Between them these two pin the read DECISION and the argv it feeds; the
         // live evidence is the E2E's `--dev` arm.
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
             github_token: GithubTokenPlan::Set(GH_SENTINEL.into()),
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
             dev: true,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            set_string: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
+            ..opts()
         });
         let line = cmds[0].display();
         assert!(line.contains("security.allowDevDefaults=true"), "{line}");
@@ -7775,23 +7205,10 @@ mod tests {
         // `operator_sets` chains `--set` THEN `--set-string`, and a key the
         // operator supplied only through the latter must exempt the run too.
         let opts = UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Untouched,
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
-            secrets: vec![],
-            dev: true,
-            adopt: false,
             no_expose: false,
-            set: vec![],
             set_string: vec!["security.allowDevDefaults=false".into()],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
+            dev: true,
+            ..opts()
         };
         guard_dev_defaults_flip(true, Some(&sealed), &opts.operator_sets()).expect(
             "an explicit `--set-string security.allowDevDefaults=false` must exempt the run \
@@ -7912,13 +7329,6 @@ mod tests {
         // credential, so both keys must survive to their own file and neither
         // may reach argv.
         let cmds = up_commands(&UpOpts {
-            retained_mail_values: None,
-            common: common(),
-            github_token: GithubTokenPlan::Set(GH_SENTINEL.into()),
-            set_string: vec![],
-            allow_egress_host: vec![],
-            resolved_egress_cidrs: vec![],
-            chart: "charts/curie".into(),
             secrets: vec![
                 ("api.apiKey".into(), "generated-api-key".into()),
                 (
@@ -7926,15 +7336,8 @@ mod tests {
                     "generated-webhook-secret".into(),
                 ),
             ],
-            dev: false,
-            adopt: false,
-            no_expose: true,
-            set: vec![],
-            allow_web_egress: vec![],
-            fake_model: false,
-            credentials: None,
-            local_model: None,
-            model: None,
+            github_token: GithubTokenPlan::Set(GH_SENTINEL.into()),
+            ..opts()
         });
 
         // Both credentials are masked in the printed form, neither is raw.
