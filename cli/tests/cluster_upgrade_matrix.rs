@@ -384,9 +384,7 @@ fn list_shards_json_covers_every_scenario_and_phase_exactly_once() {
         .collect();
     assert_eq!(
         ids,
-        [
-            "s01", "s02", "s03", "s04", "s05", "s06", "s07", "s08", "s09", "s11", "s13", "s14"
-        ],
+        ["s01", "s02", "s03", "s04", "s05", "s06", "s07", "s08", "s09", "s11", "s13", "s14"],
         "canonical shard ids\n{manifest}"
     );
 
@@ -489,7 +487,8 @@ fn self_test_checks_shard_coverage_and_timing() {
     );
 }
 
-const GOOD_SHARDS: &str = "s01 nosetup soak-refusal fresh-n n1-to-n-nonempty same-version rollback-published-088
+const GOOD_SHARDS: &str =
+    "s01 nosetup soak-refusal fresh-n n1-to-n-nonempty same-version rollback-published-088
 s02 setup fail-every-phase:plan+validate+drain_preflight
 s03 setup fail-every-phase:checkpoint+migrate+apply
 s04 setup fail-every-phase:converge
