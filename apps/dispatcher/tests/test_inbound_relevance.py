@@ -1049,7 +1049,7 @@ def test_every_inbound_payload_is_enqueued_or_refused_with_a_named_reason(
             redis_client=redis_client,
             config=config,
             slack_identity=DEFAULT_IDENTITY,
-            admission=build_admission(config),
+            admission=build_admission(config, redis_client),
             logger=harness.logger,
         )
         _drain(harness.app)

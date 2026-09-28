@@ -60,16 +60,40 @@ binding's list does not admit (ADR 0175). A binding may carry a list of who may 
 the bot through it. On a mention, a direct message or a button click that would start a
 turn, the dispatcher asks the platform API (`POST /channels/admission`, platform key)
 with the sender's id (plus the bot id when a bot sent it) or the clicking user's id. A
-refused caller gets no placeholder and no reply, and the drop is logged as
-`caller_not_allowed`. Answers are cached per route (the channel plus the Slack identity):
-a route with no list is cached as open to everyone, and an answer counts for
-`CURIE_ADMISSION_CACHE_TTL_SECONDS` (30 seconds), which is how long a list change takes to
-apply in Slack. While the API cannot answer, an expired answer still counts until it is
-`CURIE_ADMISSION_STALE_SECONDS` old (5 minutes); with nothing usable cached the caller is
-refused as `admission_unavailable`, even on a route with no list, so that reason means an
-outage rather than a list typo. Both reasons count on the `curie.turn.refused` metric.
+refused caller gets no placeholder and no reply; the drop is logged as
+`caller_not_allowed` at DEBUG, because a busy shared channel can refuse most of its
+messages, and every refusal is still counted on the `curie.turn.refused` metric.
 Approval-card clicks never start a turn and are not asked. The trusted-bot allowlist below
 still runs first, and a bot it admits must also be on the binding's list, if there is one.
+
+How answers are cached, and so how fast a change applies:
+
+- Answers are cached per route (the channel plus the Slack identity). A route with no list
+  is cached as open to everyone; a route with a list caches each caller's answer.
+- Every answer also says whether any binding on the install carries a list. While that is
+  fresh and says none does, no route is asked about at all.
+- An answer counts for `CURIE_ADMISSION_CACHE_TTL_SECONDS` (30 seconds), which is how long a
+  list change takes to apply in Slack while the API is up.
+- While the API cannot answer, an expired answer still counts until it is
+  `CURIE_ADMISSION_STALE_SECONDS` old (5 minutes), the install-wide "no list anywhere"
+  answer included. **So a list someone just added can take up to 5 minutes, not 30
+  seconds, to protect a route if the API goes down right after it is set:** the route's
+  last answer was "open", and that answer stands through the stale window.
+- With nothing usable cached the caller is refused as `admission_unavailable`, logged at
+  INFO, so that reason means an outage rather than a list typo. After a failed call, the
+  dispatcher answers from its cache for 5 seconds before asking again, so a hung API holds
+  one Bolt listener worker per 5 seconds rather than all five.
+- Answers are kept in Valkey under `CURIE_ADMISSION_CACHE_PREFIX` as well as in memory, so a
+  dispatcher that restarts during an API outage keeps what the previous process learned.
+  Every key expires with the stale window.
+- Concurrent questions about one route share one API call.
+
+**Upgrade the API before the dispatcher.** An API from before ADR 0175 answers
+`POST /channels/admission` with FastAPI's route-miss 404; such an API has no caller lists,
+so the dispatcher admits everyone (logged once) until the API is upgraded. A dispatcher
+from before ADR 0175 never asks at all, so a list set on the API is not enforced in Slack
+until the dispatcher is upgraded too. A single `helm upgrade` rolls both; set a list only
+once both run this version.
 
 Every refusal these handlers make on the message lanes is logged at INFO with its
 enumerated reason and rationale (the full list is `relevance.DROP_RATIONALES`), so an
@@ -240,6 +264,7 @@ Read from the environment by `DispatcherConfig()` (a `pydantic_settings.BaseSett
 | `CURIE_API_PREFLIGHT_TIMEOUT_SECONDS` | `30.0` | API-health budget, followed by a fresh same-size discovery-and-Slack budget; the Helm chart supplies 120 seconds while a directly run dispatcher keeps this 30-second default; must be positive |
 | `CURIE_ADMISSION_CACHE_TTL_SECONDS` | `30.0` | how long a caller-list answer from the platform API counts (ADR 0175), and so how long a list change takes to apply in Slack; must be positive and finite |
 | `CURIE_ADMISSION_STALE_SECONDS` | `300.0` | how old an expired caller-list answer may be and still count while the API cannot answer; past it, with nothing cached, the caller is refused. Must be finite and at least the TTL |
+| `CURIE_ADMISSION_CACHE_PREFIX` | `curie:admission:` | Valkey key prefix for the persisted caller-list answers, so a restarted dispatcher keeps them; change it only when two installs share one Valkey |
 
 ### Boot preflights
 

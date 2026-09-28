@@ -14,6 +14,7 @@ import json
 import logging
 import socket
 import threading
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -162,6 +163,9 @@ class FakeAdmissionApi:
         lists: ``(address, adapter) -> caller ids`` for every route that
             carries a list; a route absent here is open to everyone.
         down: when True every request answers 503, the API-outage case.
+        predates: when True every request answers FastAPI's own route-miss
+            404, the platform API from before ADR 0175 had the route.
+        delay_s: how long each answer takes, for the single-flight tests.
         requests: every request body received, in order.
         headers: the ``X-API-Key`` each request carried, in order.
     """
@@ -169,6 +173,8 @@ class FakeAdmissionApi:
     url: str
     lists: dict[tuple[str, str | None], set[str]] = dataclass_field(default_factory=dict)
     down: bool = False
+    predates: bool = False
+    delay_s: float = 0.0
     requests: list[dict[str, Any]] = dataclass_field(default_factory=list)
     headers: list[str | None] = dataclass_field(default_factory=list)
 
@@ -189,16 +195,32 @@ def fake_admission_api() -> Iterator[FakeAdmissionApi]:
                 self.send_response(404)
                 self.end_headers()
                 return
+            if state.delay_s:
+                time.sleep(state.delay_s)
             if state.down:
                 self.send_response(503)
                 self.end_headers()
                 return
+            if state.predates:
+                # Exactly what FastAPI answers for a path it has no route for.
+                payload = b'{"detail":"Not Found"}'
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
             listed = state.lists.get((body.get("address"), body.get("adapter")))
+            install_restricted = bool(state.lists)
             if listed is None:
-                answer = {"allowed": True, "restricted": False}
+                answer = {
+                    "allowed": True,
+                    "restricted": False,
+                    "install_restricted": install_restricted,
+                }
             else:
                 allowed = any(caller in listed for caller in body.get("callers", []))
-                answer = {"allowed": allowed, "restricted": True}
+                answer = {"allowed": allowed, "restricted": True, "install_restricted": True}
             payload = json.dumps(answer).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -263,9 +285,11 @@ def config(
         # dispatcher can sign an attestation with this dedicated credential.
         approval_chat_attester_secret="dispatcher-attester-test-secret",
         api_base_url=admission_api.url,
+        admission_cache_prefix=f"test:curie:admission:{token}:",
     )
     yield cfg
     keys = list(redis_client.scan_iter(f"test:curie:dedupe:{token}:*"))
+    keys.extend(redis_client.scan_iter(f"test:curie:admission:{token}:*"))
     keys.append(cfg.stream)
     if keys:
         redis_client.delete(*keys)
