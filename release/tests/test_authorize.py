@@ -1217,7 +1217,9 @@ def ci_connector_image_check_run_names() -> set[str]:
 class TestRustValkeyWorkflowContract:
     def test_rust_job_requires_and_connects_to_valkey_guarded_tests(self):
         workflow = yaml.safe_load(CI_YAML.read_text())
-        rust = workflow["jobs"]["rust"]
+        # The suite runs in the test partitions; the required Rust job only
+        # aggregates them.
+        rust = workflow["jobs"]["rust-test"]
 
         assert rust["env"]["CI_REQUIRE_VALKEY_TESTS"] == "1"
         assert rust["env"]["TEST_VALKEY_URL"] == "redis://localhost:26379"
@@ -1266,7 +1268,7 @@ class TestReleaseWorkflowContract:
         workflow = yaml.load(CI_YAML.read_text(), Loader=yaml.BaseLoader)
         clippy_step = next(
             step
-            for step in workflow["jobs"]["rust"]["steps"]
+            for step in workflow["jobs"]["rust-lint"]["steps"]
             if step.get("name") == "Clippy"
         )
         command = clippy_step["run"]
@@ -1778,6 +1780,8 @@ class TestLegitimateSkips:
             # Not a tier gate: the required Python job waits on its pytest
             # shards and must still run and report whatever they concluded.
             "python": "always()",
+            # Same for Rust: it waits on its test partitions.
+            "rust": "${{ always() }}",
         }
 
         assert actual == expected, (
