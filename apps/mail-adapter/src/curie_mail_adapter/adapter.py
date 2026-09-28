@@ -44,6 +44,22 @@ REJECTED_LABELS = frozenset({"unauthenticated", "spam", "blocked"})
 # binding's caller list (403, ADR 0175), or left pending for another attempt.
 IngressOutcome = Literal["accepted", "refused", "retry"]
 
+# The exact `detail` the channel port puts on a caller-list refusal. Only a 403
+# carrying it is final: a 403 from a proxy or firewall in front of the platform,
+# or from any other check, is an infrastructure fault and must stay retryable,
+# or real mail would be dropped for good. Frozen with the platform side in
+# `tests/vectors/channel-port-refusal.json`.
+CALLER_NOT_ALLOWED_DETAIL = "caller_not_allowed"
+
+
+def _is_caller_refusal(status: int, body: Any) -> bool:
+    """Whether a channel port answer is the caller-list refusal and nothing else."""
+    return (
+        status == 403
+        and isinstance(body, dict)
+        and body.get("detail") == CALLER_NOT_ALLOWED_DETAIL
+    )
+
 
 def _poll_should_back_off(status: int) -> bool:
     return status == 0 or 400 <= status < 500
@@ -524,10 +540,11 @@ class MailAdapter:
 
         Returns:
             ``"accepted"`` only for the platform's terminal 200 admission;
-            ``"refused"`` for a 403, which the channel port answers when the
-            binding's caller list does not admit the sender (ADR 0175) and which
-            is final for every adapter; ``"retry"`` for everything else, which
-            leaves the delivery pending under the same stable id.
+            ``"refused"`` for a 403 whose ``detail`` is ``caller_not_allowed``,
+            which the channel port answers when the binding's caller list does
+            not admit the sender (ADR 0175) and which is final for every
+            adapter; ``"retry"`` for everything else, any other 403 included,
+            which leaves the delivery pending under the same stable id.
         """
         url = f"{self.config.api_base_url.rstrip('/')}/channels/turns"
         headers = {"X-API-Key": self.config.channel_token}
@@ -567,7 +584,7 @@ class MailAdapter:
             )
             if result.status == 200:
                 return "accepted"
-            if result.status == 403:
+            if _is_caller_refusal(result.status, result.body):
                 logger.warning(
                     "ingress refused correlation=%s: the binding's caller list does not "
                     "admit this sender; settling the message without a turn",
