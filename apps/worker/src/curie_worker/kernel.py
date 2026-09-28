@@ -589,15 +589,42 @@ _CLASSIFICATION_GUIDANCE = {
         "effects; inspect the result. The run can be retried; if one turn is over the "
         "cap, raise api.transcriptMaxThreadBytes (TRANSCRIPT_MAX_THREAD_BYTES)."
     ),
-    "max-turns": (
-        "The run used its whole turn budget; raise worker.workItemMaxTurns "
-        "(CURIE_WORK_ITEM_MAX_TURNS) to allow more turns."
-    ),
 }
 
+# The runner's own turn cap when no CURIE_MAX_TURNS reaches its boot env
+# (runner/src/curie_runner/config.py).
+_RUNNER_DEFAULT_MAX_TURNS = 20
 
-def _with_guidance(lead: str, token: str) -> str:
-    guidance = _CLASSIFICATION_GUIDANCE.get(token)
+
+def _max_turns_guidance(delivered_max_turns: str | None) -> str:
+    """Name the turn limit this delivery actually ran under (#3403).
+
+    Only a work-item delivery writes CURIE_MAX_TURNS into the boot env, from
+    worker.workItemMaxTurns. Every other delivery runs under the runner's own
+    CURIE_MAX_TURNS, which the operator sets through runner.extraEnv.
+    """
+
+    if delivered_max_turns is not None:
+        return (
+            f"The work item used its whole turn budget of {delivered_max_turns} "
+            "turns; raise worker.workItemMaxTurns (CURIE_WORK_ITEM_MAX_TURNS, "
+            f"currently {delivered_max_turns}) to allow more turns."
+        )
+    return (
+        "The run used the runner's whole turn budget; raise CURIE_MAX_TURNS "
+        "through runner.extraEnv (runner default "
+        f"{_RUNNER_DEFAULT_MAX_TURNS} when unset) to allow more turns. "
+        "worker.workItemMaxTurns applies only to work items."
+    )
+
+
+def _with_guidance(
+    lead: str, token: str, *, delivered_max_turns: str | None
+) -> str:
+    if token == "max-turns":
+        guidance: str | None = _max_turns_guidance(delivered_max_turns)
+    else:
+        guidance = _CLASSIFICATION_GUIDANCE.get(token)
     return f"{lead} {guidance}" if guidance else lead
 
 
@@ -2773,6 +2800,9 @@ class Kernel:
                                 f"The run hit an error ({token}) after starting an action; "
                                 "not retrying automatically.",
                                 token,
+                                delivered_max_turns=(boot_env or {}).get(
+                                    MAX_TURNS_ENV
+                                ),
                             ),
                             detail=outcome.error_message,
                         ),
@@ -2822,6 +2852,9 @@ class Kernel:
                             lead=_with_guidance(
                                 f"The run failed ({token}) after {attempt} attempt(s).",
                                 token,
+                                delivered_max_turns=(boot_env or {}).get(
+                                    MAX_TURNS_ENV
+                                ),
                             ),
                             detail=outcome.error_message,
                         ),
