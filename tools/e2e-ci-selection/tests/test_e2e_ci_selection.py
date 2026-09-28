@@ -108,6 +108,7 @@ def _expected_output(
     pytest_needed: bool = True,
     images_needed: bool = False,
     cli_release_needed: bool = False,
+    released_upgrade_full: bool = False,
 ) -> str:
     selected_tiers = set(selected)
     lines = [
@@ -119,6 +120,9 @@ def _expected_output(
     lines.append(f"pytest={'true' if pytest_needed else 'false'}")
     lines.append(f"images={'true' if images_needed else 'false'}")
     lines.append(f"cli_release={'true' if cli_release_needed else 'false'}")
+    lines.append(
+        f"released_upgrade_full={'true' if released_upgrade_full else 'false'}"
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -646,14 +650,28 @@ def test_push_selects_every_tier_without_a_repository(tmp_path: Path) -> None:
     completed, output = _invoke_selector(tmp_path, push=True)
     assert completed.returncode == 0, completed.stderr
     assert output == _expected_output(
-        *TIERS, images_needed=True, cli_release_needed=True
+        *TIERS,
+        images_needed=True,
+        cli_release_needed=True,
+        released_upgrade_full=True,
     )
+
+
+def test_pull_request_released_upgrade_runs_the_smoke_shard_only(
+    tmp_path: Path,
+) -> None:
+    # A pull request path selection never asks for the full upgrade matrix or
+    # the released chart upgrade jobs. Push and dispatch (the nightly) do.
+    outputs = _selector_outputs(tmp_path, "charts/curie/values.yaml")
+    assert outputs["released_upgrade"] == "true"
+    assert outputs["released_upgrade_full"] == "false"
 
 
 def test_omit_kind_drops_cluster_tiers_and_keeps_the_rest(tmp_path: Path) -> None:
     kept = tuple(tier for tier in TIERS if tier not in {"cluster", "released-upgrade"})
     completed, output = _invoke_selector(tmp_path, push=True, omit_kind=True)
     assert completed.returncode == 0, completed.stderr
+    # The next push omits kind, so it runs no upgrade job at all.
     assert output == _expected_output(
         *kept, images_needed=True, cli_release_needed=True
     )
@@ -830,6 +848,7 @@ AGGREGATE_EXPRESSIONS = {
     "local_release_selected": "${{ needs.changes.outputs.local_release }}",
     "cluster_selected": "${{ needs.changes.outputs.cluster }}",
     "released_upgrade_selected": "${{ needs.changes.outputs.released_upgrade }}",
+    "released_upgrade_full": "${{ needs.changes.outputs.released_upgrade_full }}",
     "skill_local_result": "${{ needs.e2e-ladder.result }}",
     "local_release_result": "${{ needs.e2e-ladder-release.result }}",
     "cluster_result": "${{ needs.e2e-ladder-cluster.result }}",
@@ -881,6 +900,9 @@ def test_workflow_consumes_each_selection_output_exactly() -> None:
         "local_release": "${{ steps.filter.outputs.local_release }}",
         "cluster": "${{ steps.filter.outputs.cluster }}",
         "released_upgrade": "${{ steps.filter.outputs.released_upgrade }}",
+        "released_upgrade_full": (
+            "${{ steps.filter.outputs.released_upgrade_full }}"
+        ),
         "skill_local_tiers": "${{ steps.filter.outputs.skill_local_tiers }}",
         "images": "${{ steps.filter.outputs.images }}",
         "cli_release": "${{ steps.filter.outputs.cli_release }}",
@@ -909,7 +931,7 @@ def test_workflow_consumes_each_selection_output_exactly() -> None:
         "${{ needs.changes.outputs.cluster == 'true' }}"
     )
     assert jobs["e2e-released-upgrade"]["if"] == (
-        "${{ needs.changes.outputs.released_upgrade == 'true' }}"
+        "${{ needs.changes.outputs.released_upgrade_full == 'true' }}"
     )
     assert jobs["e2e-released-upgrade-negative"]["if"] == (
         jobs["e2e-released-upgrade"]["if"]
@@ -918,7 +940,7 @@ def test_workflow_consumes_each_selection_output_exactly() -> None:
         jobs["e2e-released-upgrade"]["needs"]
     )
     assert jobs["e2e-cluster-upgrade-matrix"]["if"] == (
-        jobs["e2e-released-upgrade"]["if"]
+        "${{ needs.changes.outputs.released_upgrade == 'true' }}"
     )
     assert "if" not in jobs["e2e-cluster-upgrade-matrix-shards"]
     assert jobs["images"]["if"] == "${{ needs.changes.outputs.images == 'true' }}"
@@ -950,6 +972,46 @@ def test_upgrade_matrix_shards_job_gates_coverage_and_lists_shards() -> None:
     assert len(list_steps) == 1
     assert "--list-shards --json" in list_steps[0]["run"]
     assert "$GITHUB_OUTPUT" in list_steps[0]["run"]
+    assert job["needs"] == ["changes"]
+    assert list_steps[0]["env"]["FULL"] == (
+        "${{ needs.changes.outputs.released_upgrade_full }}"
+    )
+
+
+def _list_shards(tmp_path: Path, full: str, smoke: str | None = None) -> str:
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    job = workflow["jobs"]["e2e-cluster-upgrade-matrix-shards"]
+    step = next(step for step in job["steps"] if step.get("id") == "list")
+    output = tmp_path / f"list-{full}-{smoke}"
+    environment = os.environ.copy()
+    environment.update(step["env"])
+    environment.update({"FULL": full, "GITHUB_OUTPUT": str(output)})
+    if smoke is not None:
+        environment["SMOKE_SHARD"] = smoke
+    completed = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", step["run"]],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return output.read_text()
+
+
+def test_upgrade_matrix_lists_every_shard_on_full_runs_and_one_on_prs(
+    tmp_path: Path,
+) -> None:
+    full = _list_shards(tmp_path, "true")
+    shards = json.loads(full.removeprefix("shards="))
+    assert len(shards) == 14
+    assert _list_shards(tmp_path, "false") == 'shards=["s01"]\n'
+
+
+def test_upgrade_matrix_smoke_shard_must_be_listed(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError):
+        _list_shards(tmp_path, "false", smoke="s99")
 
 
 def test_upgrade_matrix_workflow_runs_one_job_per_shard() -> None:
@@ -967,9 +1029,8 @@ def test_upgrade_matrix_workflow_runs_one_job_per_shard() -> None:
     assert job["if"] == "${{ needs.changes.outputs.released_upgrade == 'true' }}"
     assert job["timeout-minutes"] == 45
     assert job["strategy"]["fail-fast"] is False
-    # 14 shards of 9 to 18 minutes: 4 at a time took four waves (57 minutes on
-    # run 36204726414, past #2733's 45 minute ceiling); 7 takes two.
-    assert job["strategy"]["max-parallel"] == 7
+    # 14 shards run in one wave on push and dispatch; 7 took two waves.
+    assert job["strategy"]["max-parallel"] == 14
     assert job["strategy"]["matrix"] == {
         "shard": (
             "${{ fromJSON(needs.e2e-cluster-upgrade-matrix-shards.outputs.shards) }}"
@@ -1463,6 +1524,7 @@ def _run_aggregate(
         "local_release_selected": "false",
         "cluster_selected": "false",
         "released_upgrade_selected": "false",
+        "released_upgrade_full": "false",
         "skill_local_result": "skipped",
         "local_release_result": "skipped",
         "cluster_result": "skipped",
@@ -1528,6 +1590,7 @@ def test_e2e_required_validates_docs_only_ladder_skips(tmp_path: Path) -> None:
         },
         {
             "released_upgrade_selected": "true",
+            "released_upgrade_full": "true",
             "released_upgrade_result": "success",
             "released_upgrade_negative_result": "success",
             "upgrade_matrix_result": "success",
@@ -1542,6 +1605,7 @@ def test_aggregate_accepts_exact_selected_outcomes(state: dict[str, str]) -> Non
 def test_aggregate_requires_upgrade_matrix_when_released_upgrade_is_selected() -> None:
     ok = _run_aggregate(
         released_upgrade_selected="true",
+        released_upgrade_full="true",
         released_upgrade_result="success",
         released_upgrade_negative_result="success",
         upgrade_matrix_result="success",
@@ -1550,6 +1614,7 @@ def test_aggregate_requires_upgrade_matrix_when_released_upgrade_is_selected() -
     for result in ("skipped", "failure", "cancelled"):
         rejected = _run_aggregate(
             released_upgrade_selected="true",
+            released_upgrade_full="true",
             released_upgrade_result="success",
             released_upgrade_negative_result="success",
             upgrade_matrix_result=result,
@@ -1563,6 +1628,44 @@ def test_aggregate_requires_upgrade_matrix_skip_when_released_upgrade_is_not_sel
     for result in ("success", "failure", "cancelled"):
         rejected = _run_aggregate(upgrade_matrix_result=result)
         assert rejected.returncode != 0, result
+
+
+def test_aggregate_pull_request_smoke_runs_matrix_without_released_trio() -> None:
+    ok = _run_aggregate(
+        released_upgrade_selected="true",
+        released_upgrade_full="false",
+        upgrade_matrix_result="success",
+    )
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    for matrix, positive, negative in (
+        ("skipped", "skipped", "skipped"),
+        ("failure", "skipped", "skipped"),
+        ("success", "success", "skipped"),
+        ("success", "skipped", "success"),
+    ):
+        rejected = _run_aggregate(
+            released_upgrade_selected="true",
+            released_upgrade_full="false",
+            upgrade_matrix_result=matrix,
+            released_upgrade_result=positive,
+            released_upgrade_negative_result=negative,
+        )
+        assert rejected.returncode != 0, (matrix, positive, negative)
+
+
+@pytest.mark.parametrize("full", ["", "yes"])
+def test_aggregate_rejects_malformed_released_upgrade_full(full: str) -> None:
+    completed = _run_aggregate(released_upgrade_full=full)
+    assert completed.returncode != 0
+
+
+def test_aggregate_rejects_full_run_without_released_upgrade() -> None:
+    completed = _run_aggregate(
+        released_upgrade_full="true",
+        released_upgrade_result="success",
+        released_upgrade_negative_result="success",
+    )
+    assert completed.returncode != 0
 
 
 @pytest.mark.parametrize("result", ["skipped", "failure", "cancelled"])
@@ -1588,16 +1691,19 @@ def test_aggregate_requires_upgrade_matrix_shards_success(result: str) -> None:
         {"released_upgrade_negative_result": "success"},
         {
             "released_upgrade_selected": "true",
+            "released_upgrade_full": "true",
             "released_upgrade_result": "success",
             "released_upgrade_negative_result": "skipped",
         },
         {
             "released_upgrade_selected": "true",
+            "released_upgrade_full": "true",
             "released_upgrade_result": "success",
             "released_upgrade_negative_result": "failure",
         },
         {
             "released_upgrade_selected": "true",
+            "released_upgrade_full": "true",
             "released_upgrade_result": "skipped",
             "released_upgrade_negative_result": "success",
         },
