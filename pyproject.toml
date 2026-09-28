@@ -197,6 +197,7 @@ testpaths = [
     "tools/restore-drill/tests",
     "tools/sre-contract/tests",
     "tools/factory-e2e/tests",
+    "tools/runtime-assertion-gate/tests",
 ]
 
 [tool.ruff]
