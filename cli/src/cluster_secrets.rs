@@ -730,13 +730,15 @@ pub fn runner_base_verdict(
     ))
 }
 
-fn helm_get_json(common: &CommonOpts, what: &str, all: bool) -> OpsCommand {
+fn helm_get_json(common: &CommonOpts, what: &str, all: bool, revision: u32) -> OpsCommand {
     let mut args = vec![
         plain("get"),
         plain(what),
         plain(&common.release),
         plain("-n"),
         plain(&common.namespace),
+        plain("--revision"),
+        plain(revision.to_string()),
     ];
     if all {
         args.push(plain("--all"));
@@ -744,6 +746,48 @@ fn helm_get_json(common: &CommonOpts, what: &str, all: bool) -> OpsCommand {
     args.push(plain("-o"));
     args.push(plain("json"));
     OpsCommand::new("helm", args)
+}
+
+/// The revision the release is serving: the newest `deployed` row of
+/// `helm history -o json`. A failed or pending upgrade leaves the previous
+/// revision deployed, and that one is what the worker runs. With no deployed
+/// revision at all, the reason names the newest record so the operator knows
+/// which revision to roll back from.
+fn serving_revision(
+    history: &serde_json::Value,
+    release: &str,
+) -> std::result::Result<u32, String> {
+    let rows = history
+        .as_array()
+        .ok_or_else(|| format!("`helm history {release}` did not return a list"))?;
+    let revision = |row: &serde_json::Value| {
+        row.get("revision")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+    };
+    let status = |row: &serde_json::Value| {
+        row.get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string()
+    };
+    if let Some(deployed) = rows
+        .iter()
+        .filter(|row| status(row) == "deployed")
+        .filter_map(revision)
+        .max()
+    {
+        return Ok(deployed);
+    }
+    match rows.iter().max_by_key(|row| revision(row)) {
+        Some(newest) => Err(format!(
+            "release {release} has no deployed revision; its newest, revision {}, is {}. \
+             Roll back to a known-good revision with `curie cluster rollback --revision N`",
+            revision(newest).map_or_else(|| "?".to_string(), |r| r.to_string()),
+            status(newest)
+        )),
+        None => Err(format!("release {release} has no revisions")),
+    }
 }
 
 /// Pin a runner reference to its registry manifest digest. A reference that
@@ -792,8 +836,12 @@ pub async fn installed_runner(
             Err(err) => Err(format!("{err:#}")),
         }
     };
-    let values = read(helm_get_json(common, "values", true)).await?;
-    let app_version = read(helm_get_json(common, "metadata", false))
+    // A bare `helm get` answers from the newest record, even a failed upgrade
+    // whose runner never served (#3421), so read the deployed revision.
+    let history = read(crate::ops::helm_history_cmd(common)).await?;
+    let revision = serving_revision(&history, &common.release)?;
+    let values = read(helm_get_json(common, "values", true, revision)).await?;
+    let app_version = read(helm_get_json(common, "metadata", false, revision))
         .await
         .ok()
         .and_then(|m| {
@@ -1489,6 +1537,48 @@ esac
             runner_image_clears(&layered),
             vec!["agentSandbox.runnerImages.factory=null"]
         );
+    }
+
+    #[test]
+    fn serving_revision_skips_a_newer_failed_upgrade() {
+        // #3421: revision 2 serves, revision 3 failed in its pre-upgrade hook.
+        let history = serde_json::json!([
+            {"revision": 1, "status": "superseded"},
+            {"revision": 2, "status": "deployed"},
+            {"revision": 3, "status": "failed"},
+        ]);
+        assert_eq!(serving_revision(&history, "curie"), Ok(2));
+        // After `cluster rollback --revision 2` the new revision 4 serves.
+        let history = serde_json::json!([
+            {"revision": 2, "status": "superseded"},
+            {"revision": 3, "status": "failed"},
+            {"revision": 4, "status": "deployed"},
+        ]);
+        assert_eq!(serving_revision(&history, "curie"), Ok(4));
+    }
+
+    #[test]
+    fn serving_revision_refuses_naming_the_newest_when_none_is_deployed() {
+        let history = serde_json::json!([
+            {"revision": 1, "status": "superseded"},
+            {"revision": 2, "status": "failed"},
+            {"revision": 3, "status": "pending-upgrade"},
+        ]);
+        let err = serving_revision(&history, "curie").unwrap_err();
+        assert!(err.contains("no deployed revision"), "{err}");
+        assert!(err.contains("revision 3, is pending-upgrade"), "{err}");
+        assert!(serving_revision(&serde_json::json!([]), "curie").is_err());
+    }
+
+    #[test]
+    fn helm_reads_pin_the_serving_revision() {
+        let common = CommonOpts {
+            release: "curie".into(),
+            namespace: "curie".into(),
+            dry_run: false,
+        };
+        let shown = helm_get_json(&common, "values", true, 2).display();
+        assert!(shown.contains("--revision 2"), "{shown}");
     }
 
     #[test]
