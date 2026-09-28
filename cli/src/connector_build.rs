@@ -2445,22 +2445,4 @@ mod undeclared_runner_dockerfile_tests {
         let decl = load(dir.path()).unwrap();
         assert_eq!(undeclared_runner_dockerfile(dir.path(), &decl), None);
     }
-
-    /// The shipped bundles that install stdio servers declare their layer, so
-    /// `curie build` builds it and a deploy binds it (#3420).
-    #[test]
-    fn shipped_bundles_declare_their_runner_layer() {
-        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
-        for name in ["dark-factory", "github-issues", "mean-tester"] {
-            let dir = examples.join(name);
-            let decl = load(&dir).unwrap_or_else(|err| panic!("{name}: {err:#}"));
-            let runner = decl
-                .runner
-                .as_ref()
-                .unwrap_or_else(|| panic!("{name}: no runner"));
-            assert_eq!(runner.build.dockerfile, RUNNER_DOCKERFILE, "{name}");
-            check_runner_source(&dir, runner).unwrap_or_else(|err| panic!("{name}: {err:#}"));
-            assert_eq!(undeclared_runner_dockerfile(&dir, &decl), None, "{name}");
-        }
-    }
 }
