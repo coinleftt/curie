@@ -92,7 +92,7 @@ _CAPACITY_ADMISSION_TIMEOUT_S = 30.0
 # How long a turn waits, before sending its own query, for the terminal result
 # an abandoned predecessor left on the shared SDK stream (#3425). The abandoned
 # turn was already interrupted, so the CLI normally answers within seconds; a
-# CLI that never does is recycled rather than waited on.
+# turn that finds it still running fails without querying, and the next retries.
 _ABANDONED_TURN_DRAIN_TIMEOUT_S = 30.0
 _CAPACITY_ADMISSION_HISTORY = 1024
 # Re-dials the connectors named by the current failures and returns the ones
@@ -897,6 +897,32 @@ class SessionRunner:
                                     terminal_for_log = True
                                 yield line
                             return
+                        # Resynchronize before the turn is ready (#3425): steer is
+                        # refused and a stop is only recorded, so nothing else
+                        # can write to the SDK while the old turn is drained.
+                        if self._result_pending and not await self._discard_abandoned_turn():
+                            self._turn_open = False
+                            self._turn_ready = False
+                            self._status = SessionStatus.CLASSIFIED_FAILURE
+                            metric_outcome = self._metric_outcome(tracker)
+                            self._set_failed(gen)
+                            terminal_for_log = True
+                            yield to_ndjson_line(
+                                ErrorEvent(
+                                    message=(
+                                        "runner error: the previous turn has not finished; "
+                                        "this prompt was not sent"
+                                    ),
+                                    classification="runner-error",
+                                )
+                            )
+                            yield to_ndjson_line(
+                                Final(
+                                    text="run failed",
+                                    status=SessionStatus.CLASSIFIED_FAILURE,
+                                )
+                            )
+                            return
                         await self._refresh_connector_failures()
                         if self._timeout_requested:
                             # Timed out during recovery: the same terminal as
@@ -1098,46 +1124,49 @@ class SessionRunner:
                     self._timeout_interrupt_settled = None
                     self._timeout_interrupt_delivered = False
 
-    async def _discard_abandoned_turn(self) -> None:
+    async def _discard_abandoned_turn(self) -> bool:
         """Consume an abandoned predecessor's leftover output before querying.
 
         The predecessor was interrupted when it was abandoned, so the CLI ends it
         with a terminal ResultMessage that nobody read. Everything up to and
         including that result belongs to the old turn and is discarded here
-        (the turn lock is held, so no consumer can see it). If the CLI never
-        produces that result, the model session is replaced: waiting longer
-        would stall every later turn, and reading on would reattribute the old
-        turn's output to this one.
+        (the turn lock is held and the turn is not ready, so no consumer or
+        side channel can see or add to it). Returns False when that result does
+        not arrive in time: the caller then fails its turn without querying and
+        the next turn retries, because reading on would attribute the old turn's
+        output to a new prompt, and replacing the session would drop the
+        conversation this process has accumulated since boot.
         """
 
         assert self._session is not None
         discarded = 0
-        resynced = False
-        with contextlib.suppress(Exception), anyio.move_on_after(
-            _ABANDONED_TURN_DRAIN_TIMEOUT_S
-        ):
-            async for message in self._session.receive_turn():
-                discarded += 1
-                if isinstance(message, ResultMessage):
-                    resynced = True
-                    break
-        if resynced:
+        with anyio.move_on_after(_ABANDONED_TURN_DRAIN_TIMEOUT_S):
+            try:
+                async for message in self._session.receive_turn():
+                    discarded += 1
+                    if isinstance(message, ResultMessage):
+                        self._result_pending = False
+                        break
+            except Exception as exc:  # noqa: BLE001 - a broken stream is reported, not raised
+                logger.warning(
+                    "abandoned turn drain failed session=%s error_class=%s",
+                    self._session_id,
+                    type(exc).__name__,
+                )
+                return False
+        if self._result_pending:
             logger.warning(
-                "discarded abandoned turn output session=%s messages=%d",
+                "abandoned turn still running; not sending prompt session=%s messages=%d",
                 self._session_id,
                 discarded,
             )
-        else:
-            logger.warning(
-                "abandoned turn never ended; recycling model session session=%s messages=%d",
-                self._session_id,
-                discarded,
-            )
-            with contextlib.suppress(Exception):
-                await self._session.close()
-            self._session = self._factory()
-            await self._session.connect()
-        self._result_pending = False
+            return False
+        logger.warning(
+            "discarded abandoned turn output session=%s messages=%d",
+            self._session_id,
+            discarded,
+        )
+        return True
 
     def _metric_outcome(self, tracker: BudgetTracker) -> str:
         if self._timeout_requested:
@@ -1177,8 +1206,6 @@ class SessionRunner:
         gen.query_observed()
         # The prompt text never reaches OTel (e2e ladder gate); record its size only.
         gen.observe_prompt(event.text)
-        if self._result_pending:
-            await self._discard_abandoned_turn()
         self._result_pending = True
         await self._session.query(event.text)
         async for message in self._session.receive_turn():
