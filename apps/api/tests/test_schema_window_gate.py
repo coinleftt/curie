@@ -470,10 +470,10 @@ def test_python_ci_job_runs_schema_window_after_alembic_gate() -> None:
         for index, step in enumerate(steps)
         if step.get("name") == "Alembic revision gate"
     )
-    stack_index = next(
-        index for index, step in enumerate(steps) if step.get("name") == "Start dev stack"
-    )
-    assert alembic_index < gate_index < stack_index
+    assert alembic_index < gate_index
+    # The dev stack boots only in the pytest shards, so the gate stays cheap and
+    # cluster-free in the required Python job.
+    assert not any(step.get("name") == "Start dev stack" for step in steps)
 
 
 def test_rust_ci_job_runs_schema_window_gate() -> None:
