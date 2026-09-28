@@ -358,7 +358,7 @@ services:
   # (today's pull-based behavior, unchanged for anyone who doesn't set it). A
   # run with no registry auth -- e.g. CI building images from source -- can set
   # CURIE_BASE_TAG to a tag it built and tagged locally (the `ci-local`
-  # convention the `worker-local-image` CI job already uses) so compose
+  # convention the `ci-images` CI job already uses) so compose
   # resolves that local image instead of pulling, and instead of retagging the
   # build to `:latest` and silently shadowing whatever `:latest` meant before.
   curie-migrate:
