@@ -406,6 +406,8 @@ pub struct FakeUpgradeHost {
     retained_values: bool,
     runner_layer_clears: Vec<String>,
     applied: bool,
+    /// Agents whose claims Apply retired (#3422), in retirement order.
+    pub retired_claims: Vec<String>,
     pub drain_calls: u32,
     pub mutate_calls: u32,
 }
@@ -429,6 +431,7 @@ impl FakeUpgradeHost {
             retained_values: false,
             runner_layer_clears: Vec::new(),
             applied: false,
+            retired_claims: Vec::new(),
             drain_calls: 0,
             mutate_calls: 0,
         }
@@ -573,6 +576,11 @@ impl UpgradeDriver for FakeUpgradeHost {
         self.set_current(Some(to.to_string()));
         Ok(())
     }
+    fn retire_runner_layer_claims(&mut self) -> Result<()> {
+        self.retired_claims
+            .extend(self.runner_layer_clears.iter().cloned());
+        Ok(())
+    }
     fn observe_convergence(&self) -> Result<ConvergenceVerdict> {
         let mut conv = Convergence::exact_ok();
         if !self.converge_exact {
@@ -660,11 +668,18 @@ fn plan_lines(
          performs schema migration during apply"
             .into(),
         apply.join(" "),
+    ];
+    lines.extend(
+        runner_layer_retirements(&opts.common.namespace, runner_layer_clears)
+            .iter()
+            .map(OpsCommand::display),
+    );
+    lines.extend([
         "phase converge: exact images, generations, replicas, unavailable=0, hooks, queues, manifest"
             .into(),
         "phase canary: target-version smoke".into(),
         "phase commit: record known-good version".into(),
-    ];
+    ]);
     // #2299: the configuration schema version the upgrade moves from and to.
     if let Some(schema_plan) = schema_plan {
         lines.push(schema_plan.to_string());
@@ -720,6 +735,15 @@ pub(crate) fn target_runner_ref(
 /// and the layered agent list. Delegates to
 /// [`crate::cluster_secrets::layers_stopping_to_match`]; kept as a separate,
 /// directly testable seam here rather than inlined at the call site.
+/// One `kubectl delete sandboxclaim` per agent whose runner layer the upgrade
+/// clears (#3422), the same retirement `cluster deploy` runs (#3300).
+fn runner_layer_retirements(namespace: &str, agents: &[String]) -> Vec<OpsCommand> {
+    agents
+        .iter()
+        .map(|agent| crate::cluster_secrets::retire_claims_command(namespace, agent))
+        .collect()
+}
+
 fn layer_clears_from_refs(
     layered: &[String],
     current: Option<&str>,
@@ -739,7 +763,8 @@ pub(crate) fn runner_layer_notice(agents: &[String]) -> Option<String> {
          will stop matching. This upgrade clears agentSandbox.runnerImages for them: they run \
          the platform runner WITHOUT their layer until their owners rebuild with `curie build \
          --plugin-dir <dir> --registry <ref>` against the upgraded CLI and redeploy with \
-         `curie cluster deploy`",
+         `curie cluster deploy`. Their live sandboxes are retired after the helm upgrade, so \
+         existing threads start fresh on the platform runner at their next turn",
         agents.join(", ")
     ))
 }
@@ -837,6 +862,12 @@ trait UpgradeDriver {
     fn runner_layer_clears(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Retire the SandboxClaims of every agent in [`Self::runner_layer_clears`]
+    /// after Apply (#3422), so a live thread's next turn cold-starts on the
+    /// platform runner instead of keeping the old layer and old base.
+    fn retire_runner_layer_claims(&mut self) -> Result<()> {
+        Ok(())
+    }
 
     fn helm_timeout_seconds(&self) -> u64 {
         HELM_TIMEOUT_DEFAULT_SECS
@@ -914,6 +945,7 @@ async fn run_lifecycle_inner<H: UpgradeDriver>(
         // #2861: the rerun runs no Helm upgrade, so the plan must not show one.
         plan.retain(|line| {
             !line.starts_with("helm upgrade ")
+                && !line.starts_with("kubectl ")
                 && !line.starts_with("phase drain_preflight:")
                 && !line.starts_with("phase checkpoint:")
                 && !line.starts_with("phase migrate:")
@@ -1108,6 +1140,9 @@ fn execute_phase<H: UpgradeDriver>(
         UpgradePhase::Migrate => Ok(PhaseOutcome::Continue),
         UpgradePhase::Apply => {
             host.apply_target(&opts.to)?;
+            // #3422: a cleared layer only reaches live threads once their
+            // claims are gone, as `cluster deploy` does (#3300).
+            host.retire_runner_layer_claims()?;
             Ok(PhaseOutcome::Continue)
         }
         UpgradePhase::Converge => {
@@ -2515,6 +2550,22 @@ impl UpgradeDriver for LiveHost {
                 bail!("helm upgrade to {to} reported success, but the release reports no version")
             }
         }
+    }
+    fn retire_runner_layer_claims(&mut self) -> Result<()> {
+        for cmd in runner_layer_retirements(&self.opts.common.namespace, &self.runner_layer_clears)
+        {
+            let (ok, _, err) = self.run(&cmd)?;
+            if !ok {
+                bail!(
+                    "helm upgrade cleared the runner layer, but retiring its sandboxes failed \
+                     ({}): {}; run `{}` so live threads leave the old layer",
+                    cmd.display(),
+                    err.trim(),
+                    cmd.display()
+                );
+            }
+        }
+        Ok(())
     }
     fn observe_convergence(&self) -> Result<ConvergenceVerdict> {
         self.live_convergence()
