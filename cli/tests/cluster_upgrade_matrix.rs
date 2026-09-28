@@ -488,7 +488,7 @@ fn self_test_checks_shard_coverage_and_timing() {
 }
 
 const GOOD_SHARDS: &str =
-    "s01 nosetup soak-refusal fresh-n n1-to-n-nonempty same-version rollback-published-088
+    "s01 nosetup soak-refusal fresh-n n1-to-n-nonempty same-version rollback-published-088 migration-crash
 s02 setup fail-every-phase:plan+validate+drain_preflight
 s03 setup fail-every-phase:checkpoint+migrate+apply
 s04 setup fail-every-phase:converge
@@ -497,7 +497,7 @@ s06 setup fail-every-phase:commit
 s07 setup interrupt-resume:checkpoint+migrate
 s08 setup interrupt-resume:apply+commit
 s09 setup n-to-n1 guarded-rollback
-s11 nosetup rollback-published-089 migration-crash
+s11 nosetup rollback-published-089
 s13 setup converge-negative
 s14 setup previous-serves";
 
@@ -544,8 +544,8 @@ fn self_test_fails_when_override_drops_a_scenario() {
 fn self_test_fails_when_override_duplicates_a_scenario() {
     assert_override_refused(
         &GOOD_SHARDS.replace(
-            "s11 nosetup rollback-published-089 migration-crash",
-            "s11 nosetup rollback-published-089 migration-crash fresh-n",
+            "s11 nosetup rollback-published-089",
+            "s11 nosetup rollback-published-089 fresh-n",
         ),
         "duplicated scenario",
     );
