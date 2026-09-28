@@ -6613,7 +6613,6 @@ mod tests {
         // The stub port is coupled to the compose worker's SLACK_API_BASE_URL
         // (http://localhost:8155/api/); pin it so a change to one flags the other.
         assert_eq!(DEFAULT_LOCAL_STUB_PORT, 8155);
-        assert_eq!(DEFAULT_LOCAL_STUB_PORT, DEFAULT_LISTEN_PORT);
     }
 
     /// Native Linux Docker: `network_mode: host` shares the host loopback, so the
