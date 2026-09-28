@@ -165,9 +165,11 @@ CODING_SANDBOX_POD_QUOTA = 50
 START_ATTEMPTS = 3
 START_WAIT_SECONDS = 150
 # The Claude SDK can reject the configured model while titling the session and
-# surface that as `model error: unknown`, which the worker records as
-# runner_escalated in about a second. A real refusal takes longer.
+# surface that as `model error: unknown`. The worker records that as
+# unclassified (#3401); older runs recorded runner_escalated. A real refusal
+# takes longer.
 FAST_ESCALATION_SECONDS = 45
+FAST_ESCALATION_CAUSES = frozenset({"runner_escalated", "unclassified"})
 # The judged bound: the execution deadline plus terminal settlement slack.
 ELAPSED_LIMIT_SECONDS = EXECUTION_BOUND_SECONDS + 300
 # A dead tunnel is judged over several probes, not one: a single failed health
@@ -187,6 +189,8 @@ TERMINUS_CAUSES = (
     "issue_cancelled",
     "owner_lost",
     "runner_escalated",
+    "unclassified",
+    "max_turns",
     "runner_failed",
     "no_pull_request",
     "early_stop",
@@ -3986,7 +3990,7 @@ def _capture(p: Preflight, fn: Callable[[], dict[str, Any]]) -> tuple[dict[str, 
 def should_retry_fast_escalation(cause: object, elapsed: object) -> bool:
     """Whether a finished run is the short model crash, not a real ending."""
 
-    if cause != "runner_escalated":
+    if cause not in FAST_ESCALATION_CAUSES:
         return False
     if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)):
         return False

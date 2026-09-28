@@ -2852,6 +2852,7 @@ def test_unknown_classification_escalates_as_unclassified_with_event_id(
             assert h.runner.opened == ["go"]
             reply = h.sink.last_text
             assert reply == (
+                "curie-turn-failure: unclassified\n\n"
                 "The run failed (unclassified) after 1 attempt(s). "
                 "model-said-unknown event_id=evt-unknown-cause. "
                 "Flagging for a human."
@@ -2860,7 +2861,7 @@ def test_unknown_classification_escalates_as_unclassified_with_event_id(
             assert "model-said-unknown" in reply
             assert "event_id=evt-unknown-cause" in reply
             assert "(unknown)" not in reply
-            assert reply.startswith("The run failed (")
+            assert reply.startswith("curie-turn-failure: unclassified\n")
 
     asyncio.run(go())
 
@@ -2904,6 +2905,7 @@ def test_side_effect_unknown_classification_escalates_with_detail_and_event_id(
             reply = h.sink.last_text
             assert reply is not None
             assert reply == (
+                "curie-turn-failure: unclassified\n\n"
                 "The run hit an error (unclassified) after starting an action; "
                 "not retrying automatically. boom-detail "
                 "event_id=evt-unknown-side-effect. Flagging for a human."
@@ -2912,7 +2914,7 @@ def test_side_effect_unknown_classification_escalates_with_detail_and_event_id(
             assert "boom-detail" in reply
             assert "event_id=evt-unknown-side-effect" in reply
             assert "human" in reply.lower()
-            assert reply.startswith("The run hit an error (")
+            assert reply.startswith("curie-turn-failure: unclassified\n")
             assert "(unknown)" not in reply
 
     asyncio.run(go())
@@ -2934,6 +2936,7 @@ def test_sdk_rate_limit_underscore_does_not_retry(make_harness) -> None:
             assert h.runner.opened == ["go"]
             reply = h.sink.last_text
             assert reply == (
+                "curie-turn-failure: unclassified\n\n"
                 "The run failed (unclassified) after 1 attempt(s). "
                 "sdk-rate-limit-underscore event_id=evt-rate-limit-underscore. "
                 "Flagging for a human."
@@ -3021,6 +3024,7 @@ def test_allowlisted_runner_error_escalates_with_event_id(make_harness) -> None:
             assert h.runner.opened == ["go"]
             reply = h.sink.last_text
             assert reply == (
+                "curie-turn-failure: runner-error\n\n"
                 "The run failed (runner-error) after 1 attempt(s). "
                 "sandbox died event_id=evt-runner-error-cause. "
                 "Flagging for a human."
@@ -3028,7 +3032,7 @@ def test_allowlisted_runner_error_escalates_with_event_id(make_harness) -> None:
             assert "(runner-error)" in reply
             assert "sandbox died" in reply
             assert "event_id=evt-runner-error-cause" in reply
-            assert reply.startswith("The run failed (")
+            assert reply.startswith("curie-turn-failure: runner-error\n")
 
     asyncio.run(go())
 
@@ -3139,6 +3143,60 @@ def test_max_turns_escalates_once_naming_the_turn_budget_knob(make_harness) -> N
             # #3403: a chat turn ran under the runner's own cap.
             assert "CURIE_MAX_TURNS" in text, text
             assert "CURIE_WORK_ITEM_MAX_TURNS" not in text, text
+            assert text.startswith("curie-turn-failure: max-turns\n")
+            assert kernel_module.failure_class_from_reply(text) == "max-turns"
+
+    asyncio.run(go())
+
+
+def test_failed_turn_reply_replaces_success_looking_model_text(make_harness) -> None:
+    """#3401: a consumer that sees only the delivered reply must not score a
+    failed turn as a successful task reply."""
+
+    model_text = "Task complete. All checks passed."
+
+    async def go() -> None:
+        async with make_harness(max_attempts=1) as h:
+            h.runner.default_script = [
+                TextDelta(text=model_text),
+                ErrorEvent(message="turn budget exhausted", classification="max-turns"),
+                Final(text=model_text, status=FAIL),
+            ]
+            await h.kernel.process_event(_qevent("go"))
+
+            reply = h.sink.last_text
+            assert reply is not None
+            assert kernel_module.failure_class_from_reply(reply) == "max-turns"
+            assert model_text not in reply
+            assert h.sink.completions[-1].outcome == "escalated"
+
+    asyncio.run(go())
+
+
+def test_successful_reply_is_not_a_failure_marker(make_harness) -> None:
+    async def go() -> None:
+        async with make_harness() as h:
+            h.runner.default_script = [
+                TextDelta(text="the answer is PONG"),
+                Final(text="the answer is PONG", status=DONE),
+            ]
+            await h.kernel.process_event(_qevent("go"))
+
+            reply = h.sink.last_text
+            assert reply == "the answer is PONG"
+            assert kernel_module.failure_class_from_reply(reply or "") is None
+            assert (
+                kernel_module.failure_class_from_reply(
+                    "the answer is PONG\n\ncurie-turn-failure: max-turns"
+                )
+                is None
+            )
+            assert (
+                kernel_module.failure_class_from_reply(
+                    "curie-turn-failure: max-turns and more words"
+                )
+                is None
+            )
 
     asyncio.run(go())
 
@@ -4671,6 +4729,7 @@ def test_approval_resume_capacity_retries_then_escalates(
                 (
                     "C1",
                     "p-1",
+                    "curie-turn-failure: runner-error\n\n"
                     "The run failed (runner-error) after 3 attempt(s). "
                     "event_id=approval-example-resolved. Flagging for a human.",
                 )
@@ -4701,6 +4760,7 @@ def test_claim_timeout_without_quota_retries_then_escalates(make_harness) -> Non
                 (
                     "C1",
                     "p-1",
+                    "curie-turn-failure: runner-error\n\n"
                     "The run failed (runner-error) after 3 attempt(s). "
                     "event_id=evt-claim-timeout. Flagging for a human.",
                 )
@@ -6105,6 +6165,18 @@ def test_history_persistence_error_has_dedicated_factory_cause() -> None:
     )
 
     assert kernel_module._escalation_cause(failure) == "history_capacity"
+
+
+def test_max_turns_and_unclassified_have_their_own_factory_causes() -> None:
+    max_turns = kernel_module.TurnOutcome(
+        terminal_ok=False, classification="max-turns"
+    )
+    unclassified = kernel_module.TurnOutcome(
+        terminal_ok=False, classification="unclassified"
+    )
+
+    assert kernel_module._escalation_cause(max_turns) == "max_turns"
+    assert kernel_module._escalation_cause(unclassified) == "unclassified"
 
 
 @pytest.mark.parametrize(

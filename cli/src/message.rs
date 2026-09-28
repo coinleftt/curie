@@ -29,7 +29,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use crate::api::{Agent, ApiClient, ClusterMessageReplyEvent};
 use crate::chat::{
     await_reply, await_resume, capped, continue_hint_line, continue_hint_long_line,
-    parse_approval_id, resolve_targets, Outcome, SlackStub,
+    failure_class_from_reply, parse_approval_id, resolve_targets, Outcome, SlackStub,
 };
 use crate::evals::{EvalCase, EvalSuite, ExpectedStatus, LoadedEval};
 use crate::ops::{plain, require_on_path, run_capture, OpsCommand};
@@ -614,6 +614,36 @@ fn is_publication_result_text(text: &str) -> bool {
         || text.starts_with("Publication failed safely after approval: ")
 }
 
+/// A delivered reply is a successful task reply only when it is not a failed turn.
+///
+/// `escalated` is the worker's `turn.completed` outcome. A reply whose first line
+/// is the failure marker carries its class even when that completion is missing.
+/// An escalation with no marker is still a failure, class `unclassified`.
+fn reply_or_failed(latest: Option<String>, escalated: bool) -> Outcome {
+    match latest {
+        Some(text) => {
+            if let Some(class) = failure_class_from_reply(&text) {
+                Outcome::Failed {
+                    class: class.to_string(),
+                    reply: text,
+                }
+            } else if escalated {
+                Outcome::Failed {
+                    class: "unclassified".to_string(),
+                    reply: text,
+                }
+            } else {
+                Outcome::Replied(text)
+            }
+        }
+        None if escalated => Outcome::Failed {
+            class: "unclassified".to_string(),
+            reply: String::new(),
+        },
+        None => Outcome::CompletedNoEdit,
+    }
+}
+
 /// Classify one relay page into a resume wait outcome. Pure so the #2757 hang
 /// (publication result delivered, waiter still looping) is unit-testable
 /// without a cluster.
@@ -664,18 +694,13 @@ fn cluster_relay_page_outcome(
         }
     }
     if publication_result {
-        return Ok(Some(
-            latest
-                .clone()
-                .map_or(Outcome::CompletedNoEdit, Outcome::Replied),
-        ));
+        return Ok(Some(reply_or_failed(latest.clone(), false)));
     }
     if completed || terminal_page {
-        return Ok(Some(
-            latest
-                .clone()
-                .map_or(Outcome::CompletedNoEdit, Outcome::Replied),
-        ));
+        let escalated = events.iter().any(|event| {
+            event.kind == "turn.completed" && event.outcome.as_deref() == Some("escalated")
+        });
+        return Ok(Some(reply_or_failed(latest.clone(), escalated)));
     }
     if awaiting_approval {
         let approval_id = latest.as_deref().and_then(parse_approval_id);
@@ -937,6 +962,21 @@ pub fn message_reply_json(thread: &str, reply: Option<&str>) -> serde_json::Valu
     })
 }
 
+/// The machine-readable object for a failed runner turn (#3401).
+///
+/// `finalized` is false so a consumer that treats a finalized reply as task
+/// success cannot score this turn as successful. `failure_class` is the
+/// platform token, and `reply` is the delivered text.
+pub fn message_failed_json(thread: &str, reply: &str, failure_class: &str) -> serde_json::Value {
+    serde_json::json!({
+        "reply": reply,
+        "thread": thread,
+        "finalized": false,
+        "failed": true,
+        "failure_class": failure_class,
+    })
+}
+
 /// The machine-readable object for a `local`/`cluster message --json` **timeout**
 /// (issue #354): no reply was captured before the deadline, so `reply` is null,
 /// `finalized` is false, and `timed_out` marks the terminal state distinctly from
@@ -1055,6 +1095,12 @@ impl crate::ui::CliOutput for MessageDryRunOutput {
 pub enum MessageOutcomeOutput {
     /// The worker finalized the turn with reply text.
     Replied { thread: String, reply: String },
+    /// The worker delivered a failed runner turn. Exit code is 1.
+    Failed {
+        thread: String,
+        reply: String,
+        failure_class: String,
+    },
     /// The worker finished the turn but never edited the placeholder.
     NoEdit { thread: String },
     /// The turn parked awaiting human approval. `tier`/`agent`/`channel` shape the
@@ -1093,6 +1139,11 @@ impl crate::ui::CliOutput for MessageOutcomeOutput {
             MessageOutcomeOutput::Replied { thread, reply } => {
                 message_reply_json(thread, Some(reply))
             }
+            MessageOutcomeOutput::Failed {
+                thread,
+                reply,
+                failure_class,
+            } => message_failed_json(thread, reply, failure_class),
             MessageOutcomeOutput::NoEdit { thread } => message_reply_json(thread, None),
             MessageOutcomeOutput::AwaitingApproval { thread, reply, .. } => {
                 message_awaiting_approval_json(thread, reply.as_deref())
@@ -1107,6 +1158,10 @@ impl crate::ui::CliOutput for MessageOutcomeOutput {
     fn render(&self, ui: &crate::ui::Ui) {
         match self {
             MessageOutcomeOutput::Replied { reply, .. } => {
+                ui.answer(reply);
+                ui.print_tokens("\n");
+            }
+            MessageOutcomeOutput::Failed { reply, .. } => {
                 ui.answer(reply);
                 ui.print_tokens("\n");
             }
@@ -1957,6 +2012,16 @@ async fn message_local(opts: MessageOpts) -> Result<()> {
             persist_and_hint(&opts, TurnVerb::Local, &channel, &thread_ts);
             Ok(())
         }
+        Outcome::Failed { reply, class } => {
+            step.fail(&format!("failed ({class})"));
+            ui.emit(&MessageOutcomeOutput::Failed {
+                thread: thread_ts.clone(),
+                reply,
+                failure_class: class,
+            });
+            persist_and_hint(&opts, TurnVerb::Local, &channel, &thread_ts);
+            crate::exit::exit_after_drop(crate::exit::ExitClass::Failure, stub);
+        }
         Outcome::CompletedNoEdit => {
             step.done("no edit");
             ui.emit(&MessageOutcomeOutput::NoEdit {
@@ -1999,6 +2064,9 @@ async fn message_local(opts: MessageOpts) -> Result<()> {
                     .await
                     {
                         ResumeExit::Done => Ok(()),
+                        ResumeExit::Failed => {
+                            crate::exit::exit_after_drop(crate::exit::ExitClass::Failure, stub);
+                        }
                         // Still parked: the durable approval stays pending and is
                         // resolvable later, so this is retryable. Local mode holds
                         // no port-forward children, but it DOES still hold the
@@ -2290,6 +2358,8 @@ fn note_approval_pending(ui: &crate::ui::Ui, tier: &str, agent: Option<&str>, ch
 enum ResumeExit {
     /// Fully handled; the caller returns `Ok(())` and its guards drop normally.
     Done,
+    /// The resumed turn failed. The caller drops its guards and exits 1.
+    Failed,
     /// The turn is still parked (the wait elapsed, or the resumed turn hit a NEW
     /// gate). The durable `Approval` stays pending and resolvable later, so this
     /// is retryable: the caller drops its port-forward guards and exits with the
@@ -2443,6 +2513,15 @@ async fn resume_after_approval(
                 });
                 persist_and_hint(opts, verb, channel, thread_ts);
                 return ResumeExit::Done;
+            }
+            Outcome::Failed { reply, class } => {
+                ui.emit(&MessageOutcomeOutput::Failed {
+                    thread: thread_ts.to_string(),
+                    reply,
+                    failure_class: class,
+                });
+                persist_and_hint(opts, verb, channel, thread_ts);
+                return ResumeExit::Failed;
             }
             Outcome::CompletedNoEdit => {
                 ui.emit(&MessageOutcomeOutput::NoEdit {
@@ -2620,6 +2699,15 @@ async fn resume_cluster_after_approval(
                 });
                 persist_and_hint(opts, TurnVerb::Cluster, channel, thread_ts);
                 return Ok(ResumeExit::Done);
+            }
+            Outcome::Failed { reply, class } => {
+                ui.emit(&MessageOutcomeOutput::Failed {
+                    thread: thread_ts.to_string(),
+                    reply,
+                    failure_class: class,
+                });
+                persist_and_hint(opts, TurnVerb::Cluster, channel, thread_ts);
+                return Ok(ResumeExit::Failed);
             }
             Outcome::CompletedNoEdit => {
                 ui.emit(&MessageOutcomeOutput::NoEdit {
@@ -3220,6 +3308,16 @@ pub async fn message(mut opts: MessageOpts) -> Result<()> {
             persist_and_hint(&opts, TurnVerb::Cluster, &channel, &thread_ts);
             Ok(())
         }
+        Outcome::Failed { reply, class } => {
+            step.fail(&format!("failed ({class})"));
+            ui.emit(&MessageOutcomeOutput::Failed {
+                thread: thread_ts.clone(),
+                reply,
+                failure_class: class,
+            });
+            persist_and_hint(&opts, TurnVerb::Cluster, &channel, &thread_ts);
+            crate::exit::exit_after_drop(crate::exit::ExitClass::Failure, (_api_pf, _valkey_pf));
+        }
         Outcome::CompletedNoEdit => {
             step.done("no edit");
             ui.emit(&MessageOutcomeOutput::NoEdit {
@@ -3256,6 +3354,10 @@ pub async fn message(mut opts: MessageOpts) -> Result<()> {
                     .await?
                     {
                         ResumeExit::Done => Ok(()),
+                        ResumeExit::Failed => crate::exit::exit_after_drop(
+                            crate::exit::ExitClass::Failure,
+                            (_api_pf, _valkey_pf),
+                        ),
                         ResumeExit::Transient => crate::exit::exit_after_drop(
                             crate::exit::ExitClass::Transient,
                             (_api_pf, _valkey_pf),
@@ -3431,10 +3533,15 @@ pub fn reply_passes(case: &EvalCase, outcome: &Outcome) -> bool {
             // tool-call trajectory, so a tool_called grader has nothing to read
             // here and fails closed. The trajectory-aware grade lives on the
             // `skill eval` path (`turn_passes`) and the server-side eval matrix.
-            Outcome::Replied(reply) => case.grader.grade(reply, &[]),
-            Outcome::CompletedNoEdit | Outcome::AwaitingApproval { .. } | Outcome::TimedOut => {
-                false
+            // A failed runner turn never passes, even when its text contains the
+            // grader's expected answer (#3401).
+            Outcome::Replied(reply) => {
+                failure_class_from_reply(reply).is_none() && case.grader.grade(reply, &[])
             }
+            Outcome::Failed { .. }
+            | Outcome::CompletedNoEdit
+            | Outcome::AwaitingApproval { .. }
+            | Outcome::TimedOut => false,
         },
         // Gate-blocked assertion: the turn must have parked awaiting approval, and
         // the latest placeholder text (the model's narration before the gate flip)
@@ -3444,7 +3551,10 @@ pub fn reply_passes(case: &EvalCase, outcome: &Outcome) -> bool {
             Outcome::AwaitingApproval { reply, .. } => {
                 case.grader.grade(reply.as_deref().unwrap_or_default(), &[])
             }
-            Outcome::Replied(_) | Outcome::CompletedNoEdit | Outcome::TimedOut => false,
+            Outcome::Replied(_)
+            | Outcome::Failed { .. }
+            | Outcome::CompletedNoEdit
+            | Outcome::TimedOut => false,
         },
     }
 }
@@ -3695,7 +3805,7 @@ async fn run_eval_turns(
                 queue_thread_reset(conn, &thread_key).await?;
                 let elapsed = started.elapsed().as_secs_f64();
                 let output = match &outcome {
-                    Outcome::Replied(reply) => reply.clone(),
+                    Outcome::Replied(reply) | Outcome::Failed { reply, .. } => reply.clone(),
                     Outcome::AwaitingApproval { reply, .. } => reply.clone().unwrap_or_default(),
                     Outcome::CompletedNoEdit => String::new(),
                     Outcome::TimedOut => match relay_ref {
@@ -3709,6 +3819,7 @@ async fn run_eval_turns(
                 let completed = matches!(
                     outcome,
                     Outcome::Replied(_)
+                        | Outcome::Failed { .. }
                         | Outcome::AwaitingApproval { .. }
                         | Outcome::CompletedNoEdit
                 );
@@ -7930,5 +8041,100 @@ mod tests {
             Outcome::AwaitingApproval { .. } => {}
             other => panic!("expected AwaitingApproval, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn escalated_completion_is_not_a_successful_reply_even_when_the_text_looks_done() {
+        let success = "Task complete. All checks passed.";
+        let mut latest = Some(success.to_string());
+        let outcome = cluster_relay_page_outcome(
+            &[
+                relay_event("reply.update", Some(success), None),
+                relay_event("turn.completed", None, Some("escalated")),
+            ],
+            false,
+            &mut latest,
+            &mut |_| {},
+        )
+        .expect("classification")
+        .expect("escalation is terminal");
+        match &outcome {
+            Outcome::Failed { class, reply } => {
+                assert_eq!(class, "unclassified");
+                assert_eq!(reply, success);
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        let case = eval_case(GraderKind::Contains, "Task complete");
+        assert!(!reply_passes(&case, &outcome));
+    }
+
+    #[test]
+    fn a_failure_marked_reply_exposes_its_class_and_does_not_pass() {
+        let reply = "curie-turn-failure: max-turns\n\nThe run failed (max-turns).";
+        let mut latest = Some(reply.to_string());
+        let outcome = cluster_relay_page_outcome(
+            &[
+                relay_event("reply.update", Some(reply), None),
+                relay_event("turn.completed", None, Some("escalated")),
+            ],
+            false,
+            &mut latest,
+            &mut |_| {},
+        )
+        .expect("classification")
+        .expect("marked failure is terminal");
+        match &outcome {
+            Outcome::Failed { class, .. } => assert_eq!(class, "max-turns"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        let case = eval_case(GraderKind::Contains, "max-turns");
+        assert!(!reply_passes(&case, &outcome));
+        let delivered = cluster_relay_page_outcome(
+            &[
+                relay_event("reply.update", Some("the answer is PONG"), None),
+                relay_event("turn.completed", None, Some("delivered")),
+            ],
+            false,
+            &mut Some("the answer is PONG".to_string()),
+            &mut |_| {},
+        )
+        .expect("classification")
+        .expect("success is terminal");
+        assert!(matches!(delivered, Outcome::Replied(_)));
+        assert!(reply_passes(
+            &eval_case(GraderKind::Contains, "PONG"),
+            &delivered
+        ));
+    }
+
+    #[test]
+    fn turn_failure_reply_prefix_matches_the_frozen_vector() {
+        let raw = include_str!("../../tests/vectors/turn-failure-reply.json");
+        let vector: serde_json::Value = serde_json::from_str(raw).expect("vector json");
+        let allowed = [
+            "comment",
+            "reply_prefix",
+            "factory_class_line_prefix",
+            "examples",
+        ];
+        let object = vector.as_object().expect("vector object");
+        let unknown: Vec<_> = object
+            .keys()
+            .filter(|key| !allowed.contains(&key.as_str()))
+            .cloned()
+            .collect();
+        assert!(unknown.is_empty(), "unknown vector keys: {unknown:?}");
+        let prefix = vector["reply_prefix"].as_str().expect("reply_prefix");
+        assert_eq!(prefix, crate::chat::TURN_FAILURE_REPLY_PREFIX);
+        for example in vector["examples"].as_array().expect("examples") {
+            let line = example["reply_first_line"].as_str().expect("line");
+            let class = example["classification"].as_str().expect("class");
+            assert_eq!(failure_class_from_reply(line), Some(class));
+        }
+        assert_eq!(
+            failure_class_from_reply("Task complete.\ncurie-turn-failure: max-turns"),
+            None
+        );
     }
 }
