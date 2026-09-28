@@ -1551,15 +1551,26 @@ def test_an_abandoned_gate_marker_expires_within_one_lease(
             await _hold_live_delivery(client, config)
             key = config.upgrade_quiesce_key()
             waiter = asyncio.create_task(gate.await_drained(poll_interval_s=0.05))
-            await asyncio.sleep(0.2)
-            assert await client.exists(key)
+            published = time.monotonic() + 2
+            while time.monotonic() < published:
+                if await client.exists(key):
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                pytest.fail("the abandoned drain never published its lease marker")
             waiter.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await waiter
-            await asyncio.sleep(_TINY_LEASE_S + 0.3)
-            assert not await client.exists(key), (
-                "an abandoned drain left the fleet paused past one lease"
-            )
+            # The last renewal can land as the wait is cancelled. Poll past
+            # one full lease from that join instead of sleeping a fixed margin
+            # that loses to the in-flight SET.
+            absent = time.monotonic() + _TINY_LEASE_S + 2
+            while time.monotonic() < absent:
+                if not await client.exists(key):
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                pytest.fail("an abandoned drain left the fleet paused past one lease")
 
     asyncio.run(go())
 
