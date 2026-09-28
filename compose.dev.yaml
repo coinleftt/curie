@@ -103,7 +103,7 @@ services:
     # Must equal charts/curie/values.yaml `valkey.image` (compose/tests).
     image: valkey/valkey:8.1.10-alpine
     profiles: *core_profiles
-    command: ["valkey-server", "--requirepass", "${VALKEY_PASSWORD:-valkeypass}", "--appendonly", "yes", "--appendfsync", "everysec"]
+    command: ["valkey-server", "--dir", "/data", "--requirepass", "${VALKEY_PASSWORD:-valkeypass}", "--appendonly", "yes", "--appendfsync", "everysec"]
     environment:
       VALKEY_PASSWORD: ${VALKEY_PASSWORD:-valkeypass}
     ports:

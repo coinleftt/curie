@@ -22,7 +22,7 @@ from pathlib import Path
 
 import yaml
 
-wanted = ("appendonly yes", "appendfsync everysec")
+wanted = ("appendonly yes", "appendfsync everysec", "--dir /data")
 found = False
 for doc in yaml.safe_load_all(Path(sys.argv[1]).read_text()):
     if not isinstance(doc, dict):
@@ -37,6 +37,14 @@ for doc in yaml.safe_load_all(Path(sys.argv[1]).read_text()):
         missing = [phrase for phrase in wanted if phrase not in joined]
         if missing:
             print(f"valkey command missing {missing}: {joined!r}", file=sys.stderr)
+            sys.exit(1)
+        mounts = container.get("volumeMounts") or []
+        if not any(mount.get("name") == "data" and mount.get("mountPath") == "/data" for mount in mounts):
+            print("valkey data volume is not mounted at /data", file=sys.stderr)
+            sys.exit(1)
+        claims = doc.get("spec", {}).get("volumeClaimTemplates") or []
+        if not any((claim.get("metadata") or {}).get("name") == "data" for claim in claims):
+            print("valkey data volume has no PVC template", file=sys.stderr)
             sys.exit(1)
 if not found:
     print("no valkey container command in manifest", file=sys.stderr)
@@ -100,3 +108,9 @@ if [[ "$status" -eq 0 ]]; then
 fi
 
 echo "valkey AOF appendonly yes and appendfsync everysec: OK"
+
+helm template rel "$CHART" --output-dir "$TMP/byo" \
+  --set valkey.deploy=false --set-string valkey.host=redis.acme.internal >/dev/null \
+  || fail "BYO valkey render failed"
+[[ ! -e "$TMP/byo/curie/templates/valkey.yaml" ]] \
+  || fail "BYO valkey render includes a chart owned valkey"
