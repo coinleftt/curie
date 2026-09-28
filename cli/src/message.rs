@@ -4822,79 +4822,89 @@ mod tests {
         }
     }
 
+    /// Each persist-hint driver mode, the text its stderr must carry, and the
+    /// text it must not. Every mode must also exit successfully.
     #[test]
-    fn cluster_continue_hint_carries_a_nondefault_target() {
-        let output = capture_persist_hint("cluster-short");
-        let text = captured_stderr(&output);
-        assert!(output.status.success(), "{text}");
-        assert!(text.contains("curie cluster message"), "{text}");
-        assert!(
-            text.contains("--namespace") && text.contains("acme-platform"),
-            "{text}"
-        );
-        assert!(
-            text.contains("--release") && text.contains("acme-prod"),
-            "{text}"
-        );
-        assert!(text.contains("--continue"), "{text}");
-    }
-
-    #[test]
-    fn cluster_fallback_hint_carries_a_nondefault_target() {
-        let output = capture_persist_hint("cluster-fallback");
-        let text = captured_stderr(&output);
-        assert!(output.status.success(), "{text}");
-        assert!(text.contains("could not save turn context"), "{text}");
-        assert!(text.contains("curie cluster message"), "{text}");
-        assert!(
-            text.contains("--namespace") && text.contains("acme-platform"),
-            "{text}"
-        );
-        assert!(
-            text.contains("--release") && text.contains("acme-prod"),
-            "{text}"
-        );
-        assert!(
-            text.contains("--channel") && text.contains("C0EXAMPLE1"),
-            "{text}"
-        );
-        assert!(
-            text.contains("--thread") && text.contains("1700000000.000100"),
-            "{text}"
-        );
-    }
-
-    #[test]
-    fn default_cluster_hint_carries_both_target_flags() {
-        let output = capture_persist_hint("cluster-default");
-        let text = captured_stderr(&output);
-        assert!(output.status.success(), "{text}");
-        assert!(text.contains("--namespace curie"), "{text}");
-        assert!(text.contains("--release curie"), "{text}");
-        assert!(text.contains("--continue"), "{text}");
-    }
-
-    #[test]
-    fn default_cluster_fallback_hint_cannot_redirect_to_the_file_target() {
-        let output = capture_persist_hint("cluster-default-fallback");
-        let text = captured_stderr(&output);
-        assert!(output.status.success(), "{text}");
-        assert!(text.contains("could not save turn context"), "{text}");
-        assert!(text.contains("--namespace curie"), "{text}");
-        assert!(text.contains("--release curie"), "{text}");
-        assert!(!text.contains("acme-platform"), "{text}");
-        assert!(!text.contains("acme-prod"), "{text}");
-        assert!(!text.contains("--continue"), "{text}");
-    }
-
-    #[test]
-    fn local_hint_does_not_carry_cluster_target_flags() {
-        let output = capture_persist_hint("local");
-        let text = captured_stderr(&output);
-        assert!(output.status.success(), "{text}");
-        assert!(!text.contains("--namespace"), "{text}");
-        assert!(!text.contains("--release"), "{text}");
-        assert!(!text.contains("must-not-appear"), "{text}");
+    fn persist_hint_carries_the_right_target_flags_per_mode() {
+        struct Case {
+            name: &'static str,
+            mode: &'static str,
+            contains: &'static [&'static str],
+            absent: &'static [&'static str],
+        }
+        let cases = [
+            Case {
+                name: "cluster_continue_nondefault_target",
+                mode: "cluster-short",
+                contains: &[
+                    "curie cluster message",
+                    "--namespace",
+                    "acme-platform",
+                    "--release",
+                    "acme-prod",
+                    "--continue",
+                ],
+                absent: &[],
+            },
+            Case {
+                name: "cluster_fallback_nondefault_target",
+                mode: "cluster-fallback",
+                contains: &[
+                    "could not save turn context",
+                    "curie cluster message",
+                    "--namespace",
+                    "acme-platform",
+                    "--release",
+                    "acme-prod",
+                    "--channel",
+                    "C0EXAMPLE1",
+                    "--thread",
+                    "1700000000.000100",
+                ],
+                absent: &[],
+            },
+            Case {
+                name: "default_cluster_both_target_flags",
+                mode: "cluster-default",
+                contains: &["--namespace curie", "--release curie", "--continue"],
+                absent: &[],
+            },
+            Case {
+                name: "default_cluster_fallback_cannot_redirect_to_file_target",
+                mode: "cluster-default-fallback",
+                contains: &[
+                    "could not save turn context",
+                    "--namespace curie",
+                    "--release curie",
+                ],
+                absent: &["acme-platform", "acme-prod", "--continue"],
+            },
+            Case {
+                name: "local_no_cluster_target_flags",
+                mode: "local",
+                contains: &[],
+                absent: &["--namespace", "--release", "must-not-appear"],
+            },
+        ];
+        for case in cases {
+            let output = capture_persist_hint(case.mode);
+            let text = captured_stderr(&output);
+            assert!(output.status.success(), "[{}] {text}", case.name);
+            for needle in case.contains {
+                assert!(
+                    text.contains(needle),
+                    "[{}] missing {needle:?}: {text}",
+                    case.name
+                );
+            }
+            for needle in case.absent {
+                assert!(
+                    !text.contains(needle),
+                    "[{}] unexpected {needle:?}: {text}",
+                    case.name
+                );
+            }
+        }
     }
 
     const EXPECTED_OTEL_EXPORTER_ENV_KEYS: [&str; 38] = [
@@ -5496,46 +5506,6 @@ mod tests {
         }
     }
 
-    /// The defect itself (#1531 finding 3): a route binding put the card in a
-    /// different channel, and the hint must name THAT channel.
-    ///
-    /// The hint is a command a human copy-pastes. With the turn channel on it,
-    /// the default approver set -- `SlackChannelMembers(card_channel or
-    /// reply_channel)` in `apps/api/.../slack_approvers.py` -- refuses the
-    /// resolve 403 with "resolve this from the approval's channel", and the
-    /// operator has no way to derive the right value from what was printed.
-    ///
-    /// Mutation it catches: keeping `channel` at the call site, i.e. never
-    /// performing the lookup at all -- which is the pre-change behavior and is
-    /// exactly what every degraded path below must still produce.
-    #[tokio::test]
-    async fn the_hint_names_the_approvals_card_channel_when_a_route_bound_one() {
-        let base = hint_stub_api(200, HINT_ROUTE_BOUND_APPROVAL).await;
-        let opts = hint_opts(&base);
-
-        let resolved = hint_channel(
-            &opts,
-            TurnVerb::Local,
-            HINT_TURN_CHANNEL,
-            HINT_APPROVAL_ID,
-            hint_far_deadline(),
-            HINT_CHANNEL_LOOKUP_BUDGET,
-        )
-        .await;
-
-        assert_eq!(
-            resolved, HINT_CARD_CHANNEL,
-            "the hint must name the channel the card was posted to, which is \
-             where an authenticated chat principal can act on the card"
-        );
-        assert_ne!(
-            resolved, HINT_TURN_CHANNEL,
-            "the fixture keeps the card and turn channels distinct on purpose; \
-             if they matched, this test could not tell a real lookup from the \
-             unchanged fallback"
-        );
-    }
-
     /// A-T4a. The API is unreachable, so the hint degrades to the turn channel
     /// and does it promptly.
     ///
@@ -5735,163 +5705,134 @@ mod tests {
         );
     }
 
-    /// A-T4b. The lookup succeeds but the record carries no card channel, so
-    /// there is nothing to override with.
-    ///
-    /// A null `card_channel` is an older row or a direct API write, which means
-    /// the REQUESTING channel applies (#1431) -- and the requesting channel is
-    /// the turn channel. Substituting an empty string or the literal "null"
-    /// here would print an unrunnable command.
-    ///
-    /// Mutation it catches: `unwrap_or_default()` on the option, which yields
-    /// an empty, unusable channel hint.
-    #[tokio::test]
-    async fn the_hint_names_the_turn_channel_when_the_record_binds_no_route() {
-        let base = hint_stub_api(200, HINT_UNROUTED_APPROVAL).await;
-        let opts = hint_opts(&base);
-
-        let resolved = hint_channel(
-            &opts,
-            TurnVerb::Local,
-            HINT_TURN_CHANNEL,
-            HINT_APPROVAL_ID,
-            hint_far_deadline(),
-            HINT_CHANNEL_LOOKUP_BUDGET,
-        )
-        .await;
-
-        assert_eq!(
-            resolved, HINT_TURN_CHANNEL,
-            "a null card_channel means the requesting channel applies, not that \
-             the hint should print an empty or literal-null channel"
-        );
+    /// One stub response for [`hint_channel_resolves_from_the_stubbed_approval_record`].
+    struct HintStubCase {
+        name: &'static str,
+        status: u16,
+        body: &'static str,
+        expected: &'static str,
+        expected_msg: &'static str,
+        /// A channel the result must NOT be, with the reason.
+        not_expected: Option<(&'static str, &'static str)>,
+        /// Also assert the result is non-empty.
+        require_nonempty: bool,
     }
 
-    /// P2. An EMPTY `card_channel` is not a channel, and must degrade exactly
-    /// like a null one.
+    /// Every `hint_channel` case whose only input is the stub API's response.
     ///
-    /// The wire model admits `"card_channel": ""`, and the SERVER already reads
-    /// it as absent: the authorizer resolves the approver set as
-    /// `approval.card_channel or approval.reply_channel`
-    /// (`apps/api/src/curie_api/slack_approvers.py:174`), and an empty string is
-    /// falsy in Python, so the members of the REPLY channel are the approver
-    /// set. A CLI that echoed the empty value would print an unusable hint --
-    /// the exact failure #1531 exists to remove, reintroduced by the fix for it
-    /// and on a record shape nothing else in the suite covers.
-    ///
-    /// The turn channel is the right answer rather than merely a safe one: it
-    /// IS the reply channel, which is what the server falls back to.
-    ///
-    /// Mutation it catches: `Ok(Some(card_channel)) => card_channel` with no
-    /// emptiness check, which is what the current implementation does.
+    /// - `route_bound` (#1531 finding 3): a route binding put the card in a
+    ///   different channel and the hint must name THAT channel; the turn
+    ///   channel would draw a 403 from `SlackChannelMembers(card_channel or
+    ///   reply_channel)`. Catches never performing the lookup.
+    /// - `unrouted` (A-T4b): a null `card_channel` means the requesting (turn)
+    ///   channel applies (#1431). Catches `unwrap_or_default()`.
+    /// - `empty_card_channel` (P2): `""` is falsy in Python, so the server falls
+    ///   back to the reply channel (`slack_approvers.py:174`). Catches a missing
+    ///   emptiness check.
+    /// - `whitespace_card_channel`: `" "` is TRUTHY in Python, so the server
+    ///   authorizes against it verbatim. This row and `empty_card_channel` are
+    ///   deliberately a PAIR differing by one space; do not "simplify" with a
+    ///   `trim()`. Catches `!card_channel.trim().is_empty()`.
+    /// - `approval_gone`: a 404 (another operator resolved or expired it) is
+    ///   absorbed by the advisory wrapper, not surfaced. Catches bubbling the
+    ///   client error out and failing the turn.
     #[tokio::test]
-    async fn the_hint_names_the_turn_channel_when_the_card_channel_is_empty() {
-        let base = hint_stub_api(200, HINT_EMPTY_CARD_APPROVAL).await;
-        let opts = hint_opts(&base);
+    async fn hint_channel_resolves_from_the_stubbed_approval_record() {
+        let cases = [
+            HintStubCase {
+                name: "route_bound",
+                status: 200,
+                body: HINT_ROUTE_BOUND_APPROVAL,
+                expected: HINT_CARD_CHANNEL,
+                expected_msg: "the hint must name the channel the card was posted to, which is \
+                               where an authenticated chat principal can act on the card",
+                not_expected: Some((
+                    HINT_TURN_CHANNEL,
+                    "the fixture keeps the card and turn channels distinct on purpose; \
+                     if they matched, this test could not tell a real lookup from the \
+                     unchanged fallback",
+                )),
+                require_nonempty: false,
+            },
+            HintStubCase {
+                name: "unrouted",
+                status: 200,
+                body: HINT_UNROUTED_APPROVAL,
+                expected: HINT_TURN_CHANNEL,
+                expected_msg: "a null card_channel means the requesting channel applies, not that \
+                               the hint should print an empty or literal-null channel",
+                not_expected: None,
+                require_nonempty: false,
+            },
+            HintStubCase {
+                name: "empty_card_channel",
+                status: 200,
+                body: HINT_EMPTY_CARD_APPROVAL,
+                expected: HINT_TURN_CHANNEL,
+                expected_msg: "an empty card_channel is what the server itself treats as absent, \
+                               so the hint must name the reply channel the server falls back to, \
+                               which is the turn channel",
+                not_expected: None,
+                require_nonempty: true,
+            },
+            HintStubCase {
+                name: "whitespace_card_channel",
+                status: 200,
+                body: HINT_BLANK_CARD_APPROVAL,
+                expected: HINT_BLANK_CARD_CHANNEL,
+                expected_msg: "a whitespace-only card_channel is TRUTHY in Python, so the server \
+                               authorizes against that exact value; the hint must reproduce it \
+                               byte for byte rather than trimming it away",
+                not_expected: Some((
+                    HINT_TURN_CHANNEL,
+                    "degrading here prints a channel the server will not accept, which \
+                     is the 403 this whole change exists to remove",
+                )),
+                require_nonempty: false,
+            },
+            HintStubCase {
+                name: "approval_gone",
+                status: 404,
+                body: r#"{"detail":"approval not found"}"#,
+                expected: HINT_TURN_CHANNEL,
+                expected_msg: "an approval resolved out from under the wait is 'no answer'; the \
+                               hint degrades rather than the turn failing",
+                not_expected: None,
+                require_nonempty: false,
+            },
+        ];
 
-        let resolved = hint_channel(
-            &opts,
-            TurnVerb::Local,
-            HINT_TURN_CHANNEL,
-            HINT_APPROVAL_ID,
-            hint_far_deadline(),
-            HINT_CHANNEL_LOOKUP_BUDGET,
-        )
-        .await;
+        for case in cases {
+            let base = hint_stub_api(case.status, case.body).await;
+            let opts = hint_opts(&base);
 
-        assert!(
-            !resolved.is_empty(),
-            "the hint must never report an empty card location; fall back to \
-             the requesting channel when no route-bound location exists"
-        );
-        assert_eq!(
-            resolved, HINT_TURN_CHANNEL,
-            "an empty card_channel is what the server itself treats as absent, \
-             so the hint must name the reply channel the server falls back to, \
-             which is the turn channel"
-        );
-    }
+            let resolved = hint_channel(
+                &opts,
+                TurnVerb::Local,
+                HINT_TURN_CHANNEL,
+                HINT_APPROVAL_ID,
+                hint_far_deadline(),
+                HINT_CHANNEL_LOOKUP_BUDGET,
+            )
+            .await;
 
-    /// The other side of that boundary: a WHITESPACE-ONLY `card_channel` is a
-    /// real channel to the server, so the hint must print it VERBATIM.
-    ///
-    /// This test and
-    /// `the_hint_names_the_turn_channel_when_the_card_channel_is_empty` are
-    /// deliberately a PAIR, and the pair is the point. The server picks the
-    /// approver set with `approval.card_channel or approval.reply_channel`
-    /// (`apps/api/src/curie_api/slack_approvers.py:174`), and in Python ONLY the
-    /// empty string is falsy. `" "` is truthy, so the authorizer takes that
-    /// exact whitespace value as the card channel. A CLI that trimmed before
-    /// testing for emptiness would degrade to the turn channel and hand the
-    /// operator the wrong card location -- which is the very failure #1531
-    /// exists to remove, so a guard meant to prevent it would be causing it.
-    ///
-    /// The CLI's job here is to mirror Python falsiness exactly, not to improve
-    /// on it: only `""` is absent, and everything else is printed as-is. A later
-    /// reader must not "simplify" these two tests into one with a `trim()`; the
-    /// two fixtures differ by a single space precisely so that collapse fails.
-    ///
-    /// Mutation it catches: `!card_channel.trim().is_empty()` in place of
-    /// `!card_channel.is_empty()`, which is what the current implementation
-    /// does.
-    #[tokio::test]
-    async fn a_whitespace_only_card_channel_is_a_channel_and_prints_verbatim() {
-        let base = hint_stub_api(200, HINT_BLANK_CARD_APPROVAL).await;
-        let opts = hint_opts(&base);
-
-        let resolved = hint_channel(
-            &opts,
-            TurnVerb::Local,
-            HINT_TURN_CHANNEL,
-            HINT_APPROVAL_ID,
-            hint_far_deadline(),
-            HINT_CHANNEL_LOOKUP_BUDGET,
-        )
-        .await;
-
-        assert_eq!(
-            resolved, HINT_BLANK_CARD_CHANNEL,
-            "a whitespace-only card_channel is TRUTHY in Python, so the server \
-             authorizes against that exact value; the hint must reproduce it \
-             byte for byte rather than trimming it away"
-        );
-        assert_ne!(
-            resolved, HINT_TURN_CHANNEL,
-            "degrading here prints a channel the server will not accept, which \
-             is the 403 this whole change exists to remove"
-        );
-    }
-
-    /// A 404 is absorbed by the advisory wrapper, not surfaced.
-    ///
-    /// Real rather than theoretical: another operator can resolve or expire the
-    /// approval between the pending notice and the hint. The client method
-    /// propagates the 404 (see `cli/tests/approval_hint_channel.rs`), and this
-    /// is the layer that turns it into today's behavior. The operator then
-    /// discovers the resolution through the wait itself.
-    ///
-    /// Mutation it catches: bubbling the client error out of the wrapper, which
-    /// would make a race between two operators fail the turn.
-    #[tokio::test]
-    async fn the_hint_names_the_turn_channel_when_the_approval_is_already_gone() {
-        let base = hint_stub_api(404, r#"{"detail":"approval not found"}"#).await;
-        let opts = hint_opts(&base);
-
-        let resolved = hint_channel(
-            &opts,
-            TurnVerb::Local,
-            HINT_TURN_CHANNEL,
-            HINT_APPROVAL_ID,
-            hint_far_deadline(),
-            HINT_CHANNEL_LOOKUP_BUDGET,
-        )
-        .await;
-
-        assert_eq!(
-            resolved, HINT_TURN_CHANNEL,
-            "an approval resolved out from under the wait is 'no answer'; the \
-             hint degrades rather than the turn failing"
-        );
+            if case.require_nonempty {
+                assert!(
+                    !resolved.is_empty(),
+                    "[{}] the hint must never report an empty card location; fall back to \
+                     the requesting channel when no route-bound location exists",
+                    case.name
+                );
+            }
+            assert_eq!(
+                resolved, case.expected,
+                "[{}] {}",
+                case.name, case.expected_msg
+            );
+            if let Some((forbidden, why)) = case.not_expected {
+                assert_ne!(resolved, forbidden, "[{}] {}", case.name, why);
+            }
+        }
     }
 
     // ─── #1531 finding 3, cluster arm: degradation without a leaked child ────
@@ -7891,32 +7832,6 @@ mod tests {
                 "must not reject {parts:?}"
             );
         }
-    }
-
-    #[test]
-    fn reject_agent_named_message_sees_json_before_the_verb() {
-        let err = reject_agent_named_message(&argv(&[
-            "--json",
-            "local",
-            "message",
-            "acme-bot",
-            "Who are you?",
-        ]))
-        .expect("global --json must not hide the two-positional trap");
-        assert!(format!("{err:#}").contains("local message"), "{err:#}");
-    }
-
-    #[test]
-    fn reject_agent_named_message_sees_json_between_target_and_verb() {
-        let err = reject_agent_named_message(&argv(&[
-            "cluster",
-            "--json",
-            "message",
-            "acme-bot",
-            "Who are you?",
-        ]))
-        .expect("global --json between target and verb must not hide the trap");
-        assert!(format!("{err:#}").contains("cluster message"), "{err:#}");
     }
 
     fn relay_event(
