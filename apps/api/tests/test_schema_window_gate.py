@@ -478,7 +478,7 @@ def test_python_ci_job_runs_schema_window_after_alembic_gate() -> None:
 
 def test_rust_ci_job_runs_schema_window_gate() -> None:
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yaml").read_text())
-    steps = workflow["jobs"]["rust"]["steps"]
+    steps = workflow["jobs"]["rust-lint"]["steps"]
 
     matching_steps = [step for step in steps if step.get("run") == CHECK_COMMAND]
     assert len(matching_steps) == 1
