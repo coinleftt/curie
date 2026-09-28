@@ -911,7 +911,9 @@ determine, with the fix `curie build --plugin-dir <dir> --registry <ref>
 runner with the one the target release renders. When they differ, or either
 cannot be determined, it names every agent in `agentSandbox.runnerImages` before
 upgrading, in the plan and `--dry-run` output too, and clears those entries in
-the same `helm upgrade`. Those agents run the new platform runner without their
+the same `helm upgrade`. After that upgrade it deletes those agents'
+SandboxClaims, as `curie cluster deploy` does, so a live thread's next turn
+starts a fresh sandbox instead of keeping the old layer. Those agents run the new platform runner without their
 layer until their owners rebuild with `curie build` and redeploy. Both checks need
 docker buildx and registry access to resolve runner digests: without it, `curie
 cluster deploy` refuses and `curie cluster upgrade` clears every layer.
