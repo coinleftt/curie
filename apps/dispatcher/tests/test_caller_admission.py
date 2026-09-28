@@ -17,7 +17,12 @@ production gate over that server with an injected clock, so no test sleeps.
 from __future__ import annotations
 
 import json
+import logging
+import threading
+import time
+import uuid
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -47,6 +52,7 @@ from .test_inbound_relevance import (
 )
 
 LISTED = "U0EXAMPLE1"
+OTHER = "U0EXAMPLE2"
 STRANGER = "U123"  # the sender `_mention` stamps
 DM_SENDER = "U9"  # the sender `_dm` stamps
 CHANNEL = "C123"  # the channel `_mention` and `_block_action_body` stamp
@@ -102,12 +108,34 @@ def _refused_points(
     ]
 
 
-def _gate(api: FakeAdmissionApi, clock: _Clock) -> AdmissionGate:
+@dataclass
+class _Store:
+    """The real Valkey the gate persists into, under a per-test prefix."""
+
+    redis: redis.Redis
+    prefix: str
+
+
+@pytest.fixture
+def store(redis_client: redis.Redis) -> Iterator[_Store]:
+    prefix = f"test:curie:admission:{uuid.uuid4().hex}:"
+    yield _Store(redis_client, prefix)
+    keys = list(redis_client.scan_iter(f"{prefix}*"))
+    if keys:
+        redis_client.delete(*keys)
+
+
+def _gate(
+    api: FakeAdmissionApi, clock: _Clock, store: _Store, **kwargs: Any
+) -> AdmissionGate:
     return AdmissionGate(
         AdmissionClient(api_base_url=api.url, api_key="curie-dev-key"),
         ttl_s=TTL,
         stale_s=STALE,
         clock=clock,
+        redis_client=store.redis,
+        key_prefix=store.prefix,
+        **kwargs,
     )
 
 
@@ -180,9 +208,9 @@ def test_the_direct_message_lane_asks_too(
     assert _drop_reasons_logged(refused.records) == [DropReason.CALLER_NOT_ALLOWED]
     assert admission_api.requests[-1]["callers"] == [DM_SENDER]
 
-    admission_api.lists[(DM_CHANNEL, None)] = {LISTED, DM_SENDER}
-    # A fresh app is a fresh cache, as a fresh dispatcher pod would be.
-    _deliver(config, redis_client, _events_api_request("env-dm-2", "Ev-dm-2", _dm()))
+    listed_dm = _dm()
+    listed_dm["user"] = LISTED
+    _deliver(config, redis_client, _events_api_request("env-dm-2", "Ev-dm-2", listed_dm))
     assert len(_stream_entries(redis_client, config)) == 1
 
 
@@ -224,7 +252,7 @@ def test_an_approval_click_never_starts_a_turn_and_is_not_asked(
         redis_client=redis_client,
         config=config,
         slack_identity="default",
-        admission=build_admission(config),
+        admission=build_admission(config, redis_client),
     )
     assert result is None
     assert admission_api.requests == []
@@ -293,10 +321,10 @@ def test_a_cold_miss_while_the_api_is_down_is_refused_even_with_no_list(
 
 
 def test_an_open_route_is_asked_once_per_ttl_not_once_per_message(
-    admission_api: FakeAdmissionApi,
+    admission_api: FakeAdmissionApi, store: _Store
 ) -> None:
     clock = _Clock()
-    gate = _gate(admission_api, clock)
+    gate = _gate(admission_api, clock, store)
     for caller in ("U0EXAMPLE1", "U0EXAMPLE2", "U0EXAMPLE3"):
         assert gate.refusal(address=CHANNEL, adapter=None, callers=[caller]) is None
     assert len(admission_api.requests) == 1
@@ -307,11 +335,11 @@ def test_an_open_route_is_asked_once_per_ttl_not_once_per_message(
 
 
 def test_a_restricted_route_caches_each_caller_separately(
-    admission_api: FakeAdmissionApi,
+    admission_api: FakeAdmissionApi, store: _Store
 ) -> None:
     admission_api.lists[(CHANNEL, None)] = {LISTED}
     clock = _Clock()
-    gate = _gate(admission_api, clock)
+    gate = _gate(admission_api, clock, store)
     assert gate.refusal(address=CHANNEL, adapter=None, callers=[LISTED]) is None
     assert gate.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is (
         DropReason.CALLER_NOT_ALLOWED
@@ -323,12 +351,14 @@ def test_a_restricted_route_caches_each_caller_separately(
     assert len(admission_api.requests) == 2
 
 
-def test_a_list_change_applies_once_the_ttl_expires(admission_api: FakeAdmissionApi) -> None:
+def test_a_list_change_applies_once_the_ttl_expires(
+    admission_api: FakeAdmissionApi, store: _Store
+) -> None:
     """Decision 7: a change applies within 30 seconds, additions and removals
     alike, and never sooner than the cache allows."""
 
     clock = _Clock()
-    gate = _gate(admission_api, clock)
+    gate = _gate(admission_api, clock, store)
     assert gate.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is None
 
     admission_api.lists[(CHANNEL, None)] = {LISTED}
@@ -345,13 +375,13 @@ def test_a_list_change_applies_once_the_ttl_expires(admission_api: FakeAdmission
 
 
 def test_a_restricted_answer_retires_the_routes_open_entry(
-    admission_api: FakeAdmissionApi,
+    admission_api: FakeAdmissionApi, store: _Store
 ) -> None:
     """Once one caller's answer shows the route has a list, an older open
     entry must not keep admitting other callers through the stale window."""
 
     clock = _Clock()
-    gate = _gate(admission_api, clock)
+    gate = _gate(admission_api, clock, store)
     assert gate.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is None
     admission_api.lists[(CHANNEL, None)] = {LISTED}
     clock.now += TTL
@@ -367,11 +397,11 @@ def test_a_restricted_answer_retires_the_routes_open_entry(
 
 
 def test_stale_answers_count_while_the_api_is_down_until_five_minutes(
-    admission_api: FakeAdmissionApi,
+    admission_api: FakeAdmissionApi, store: _Store
 ) -> None:
     admission_api.lists[(CHANNEL, None)] = {LISTED}
     clock = _Clock()
-    gate = _gate(admission_api, clock)
+    gate = _gate(admission_api, clock, store)
     assert gate.refusal(address=CHANNEL, adapter=None, callers=[LISTED]) is None
     assert gate.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is (
         DropReason.CALLER_NOT_ALLOWED
@@ -381,12 +411,13 @@ def test_stale_answers_count_while_the_api_is_down_until_five_minutes(
     admission_api.down = True
     clock.now += STALE - 1
     # Expired, so the API is asked; it cannot answer, so the stale answers
-    # stand, the refusal as much as the admission.
+    # stand, the refusal as much as the admission. The second question falls
+    # inside the failure backoff and is answered without asking again.
     assert gate.refusal(address=CHANNEL, adapter=None, callers=[LISTED]) is None
     assert gate.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is (
         DropReason.CALLER_NOT_ALLOWED
     )
-    assert len(admission_api.requests) == asked + 2
+    assert len(admission_api.requests) == asked + 1
 
     clock.now += 1
     assert gate.refusal(address=CHANNEL, adapter=None, callers=[LISTED]) is (
@@ -395,10 +426,10 @@ def test_stale_answers_count_while_the_api_is_down_until_five_minutes(
 
 
 def test_a_stale_open_route_still_admits_during_an_outage(
-    admission_api: FakeAdmissionApi,
+    admission_api: FakeAdmissionApi, store: _Store
 ) -> None:
     clock = _Clock()
-    gate = _gate(admission_api, clock)
+    gate = _gate(admission_api, clock, store)
     assert gate.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is None
     admission_api.down = True
     clock.now += TTL + 1
@@ -409,13 +440,15 @@ def test_a_stale_open_route_still_admits_during_an_outage(
     )
 
 
-def test_the_route_key_carries_the_slack_identity(admission_api: FakeAdmissionApi) -> None:
+def test_the_route_key_carries_the_slack_identity(
+    admission_api: FakeAdmissionApi, store: _Store
+) -> None:
     """ADR-0168 decision 3: two identities on one channel are two routes, so an
     answer for one must never be served for the other."""
 
     admission_api.lists[(CHANNEL, "ops")] = {LISTED}
     clock = _Clock()
-    gate = _gate(admission_api, clock)
+    gate = _gate(admission_api, clock, store)
     assert gate.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is None
     assert gate.refusal(address=CHANNEL, adapter="ops", callers=[STRANGER]) is (
         DropReason.CALLER_NOT_ALLOWED
@@ -428,22 +461,20 @@ def test_the_route_key_carries_the_slack_identity(admission_api: FakeAdmissionAp
     }
 
 
-def test_the_cache_is_bounded(admission_api: FakeAdmissionApi) -> None:
+def test_the_in_process_layer_is_bounded_and_valkey_backs_it(
+    admission_api: FakeAdmissionApi, store: _Store
+) -> None:
+    """The LRU holds at most max_entries; an answer it evicted is still served
+    from Valkey rather than costing a second API call."""
+
     admission_api.lists[(CHANNEL, None)] = {LISTED}
     clock = _Clock()
-    gate = AdmissionGate(
-        AdmissionClient(api_base_url=admission_api.url, api_key="k"),
-        ttl_s=TTL,
-        stale_s=STALE,
-        clock=clock,
-        max_entries=2,
-    )
+    gate = _gate(admission_api, clock, store, max_entries=2)
     for caller in ("U0EXAMPLE1", "U0EXAMPLE2", "U0EXAMPLE3"):
         gate.refusal(address=CHANNEL, adapter=None, callers=[caller])
     asked = len(admission_api.requests)
-    # The oldest entry was evicted, so asking about it again is a new call.
-    gate.refusal(address=CHANNEL, adapter=None, callers=["U0EXAMPLE1"])
-    assert len(admission_api.requests) == asked + 1
+    assert gate.refusal(address=CHANNEL, adapter=None, callers=["U0EXAMPLE1"]) is None
+    assert len(admission_api.requests) == asked
 
 
 # --- the client -----------------------------------------------------------------
@@ -457,8 +488,12 @@ def test_the_cache_is_bounded(admission_api: FakeAdmissionApi) -> None:
         httpx.Response(200, text="not json"),
         httpx.Response(200, json={"allowed": "yes", "restricted": False}),
         httpx.Response(200, json={"restricted": True}),
+        # A 404 that is not FastAPI's own route miss (a proxy page, a wrong
+        # base URL) proves nothing about the API's version: still unavailable.
+        httpx.Response(404, text="<html>404 Not Found</html>"),
+        httpx.Response(404, json={"detail": "no agent is bound"}),
     ],
-    ids=["401", "422", "not-json", "not-bool", "missing-field"],
+    ids=["401", "422", "not-json", "not-bool", "missing-field", "404-html", "404-other"],
 )
 def test_any_unusable_answer_counts_as_the_api_being_unable_to_answer(
     response: httpx.Response,
@@ -473,7 +508,7 @@ def test_any_unusable_answer_counts_as_the_api_being_unable_to_answer(
         client=httpx.Client(transport=httpx.MockTransport(lambda _request: response)),
     )
     assert client.ask(address=CHANNEL, adapter=None, callers=(STRANGER,)) is None
-    gate = AdmissionGate(client, ttl_s=TTL, stale_s=STALE, clock=_Clock())
+    gate = AdmissionGate(client, ttl_s=TTL, stale_s=STALE, clock=_Clock(), redis_client=None)
     assert gate.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is (
         DropReason.ADMISSION_UNAVAILABLE
     )
@@ -510,3 +545,225 @@ def test_a_cache_setting_that_would_disable_failing_closed_refuses_boot(
 ) -> None:
     with pytest.raises(ValidationError):
         DispatcherConfig(**{**config.model_dump(), **overrides})
+
+
+# --- review follow-up: upgrades, restarts, outages, thread use -------------------
+
+
+def test_an_api_that_predates_the_endpoint_admits_and_says_so_once(
+    admission_api: FakeAdmissionApi, store: _Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A dispatcher rolled before its API gets FastAPI's route-miss 404. That
+    API has no caller lists at all, so no list can refuse anyone: admit, and
+    log the version skew once rather than per message."""
+
+    admission_api.predates = True
+    clock = _Clock()
+    gate = _gate(admission_api, clock, store)
+    with caplog.at_level(logging.WARNING, logger="curie_dispatcher.admission"):
+        assert gate.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is None
+        clock.now += TTL
+        assert gate.refusal(address="C0EXAMPLE9", adapter=None, callers=[OTHER]) is None
+    skew = [r for r in caplog.records if "predates" in r.getMessage()]
+    assert len(skew) == 1
+
+
+def test_a_predating_api_admits_end_to_end_through_bolt(
+    config: DispatcherConfig, redis_client: redis.Redis, admission_api: FakeAdmissionApi
+) -> None:
+    admission_api.predates = True
+    _deliver(config, redis_client, _events_api_request("env-old", "Ev-old", _mention(text="hi")))
+    assert len(_stream_entries(redis_client, config)) == 1
+
+
+def test_a_restarted_dispatcher_keeps_its_answers_in_valkey(
+    admission_api: FakeAdmissionApi, store: _Store
+) -> None:
+    """The cache outlives the process: a dispatcher that restarts during an API
+    blip still answers from what the previous process learned."""
+
+    admission_api.lists[(CHANNEL, None)] = {LISTED}
+    clock = _Clock()
+    first = _gate(admission_api, clock, store)
+    assert first.refusal(address=CHANNEL, adapter=None, callers=[LISTED]) is None
+    assert first.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is (
+        DropReason.CALLER_NOT_ALLOWED
+    )
+    asked = len(admission_api.requests)
+
+    # A new process: empty memory, same Valkey. Fresh answers need no call.
+    second = _gate(admission_api, clock, store)
+    assert second.refusal(address=CHANNEL, adapter=None, callers=[LISTED]) is None
+    assert len(admission_api.requests) == asked
+
+    # A third process, while the API is down and the answers are stale: the
+    # remembered answers still stand, refusal included.
+    admission_api.down = True
+    clock.now += TTL + 1
+    third = _gate(admission_api, clock, store)
+    assert third.refusal(address=CHANNEL, adapter=None, callers=[LISTED]) is None
+    assert third.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is (
+        DropReason.CALLER_NOT_ALLOWED
+    )
+
+
+def test_persisted_answers_expire_with_the_stale_window(
+    admission_api: FakeAdmissionApi, store: _Store
+) -> None:
+    """Valkey keeps nothing past the stale window, so a restart can never serve
+    an answer older than ADR 0175's 5-minute bound."""
+
+    clock = _Clock()
+    _gate(admission_api, clock, store).refusal(address=CHANNEL, adapter=None, callers=[STRANGER])
+    keys = list(store.redis.scan_iter(f"{store.prefix}*"))
+    assert keys
+    assert all(0 < store.redis.ttl(key) <= STALE for key in keys)
+
+    admission_api.down = True
+    clock.now += STALE
+    assert _gate(admission_api, clock, store).refusal(
+        address="C0EXAMPLE9", adapter=None, callers=[OTHER]
+    ) is DropReason.ADMISSION_UNAVAILABLE
+
+
+def test_an_install_with_no_list_anywhere_admits_a_cold_miss_during_an_outage(
+    admission_api: FakeAdmissionApi, store: _Store
+) -> None:
+    """The install-wide answer: the last word from the API was that no binding
+    carries a list, within the stale window, so a route it never asked about is
+    admitted while the API is down."""
+
+    clock = _Clock()
+    gate = _gate(admission_api, clock, store)
+    assert gate.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is None
+    admission_api.down = True
+    clock.now += TTL + 1
+    assert gate.refusal(address="C0EXAMPLE9", adapter=None, callers=[OTHER]) is None
+    # And a restarted process remembers it too.
+    assert _gate(admission_api, clock, store).refusal(
+        address="C0EXAMPLE8", adapter=None, callers=[OTHER]
+    ) is None
+
+
+def test_an_install_with_any_list_still_refuses_a_cold_miss_during_an_outage(
+    admission_api: FakeAdmissionApi, store: _Store
+) -> None:
+    admission_api.lists[("C0EXAMPLE7", None)] = {LISTED}
+    clock = _Clock()
+    gate = _gate(admission_api, clock, store)
+    assert gate.refusal(address=CHANNEL, adapter=None, callers=[STRANGER]) is None
+    admission_api.down = True
+    clock.now += TTL + 1
+    assert gate.refusal(address="C0EXAMPLE9", adapter=None, callers=[OTHER]) is (
+        DropReason.ADMISSION_UNAVAILABLE
+    )
+
+
+def test_a_fresh_install_wide_no_list_answer_saves_the_call(
+    admission_api: FakeAdmissionApi, store: _Store
+) -> None:
+    """An install that never sets a list asks once per TTL in total, not once
+    per route, and a list set anywhere applies within the same 30 seconds."""
+
+    clock = _Clock()
+    gate = _gate(admission_api, clock, store)
+    for address in ("C0EXAMPLE1", "C0EXAMPLE2", "D0EXAMPLE1"):
+        assert gate.refusal(address=address, adapter=None, callers=[STRANGER]) is None
+    assert len(admission_api.requests) == 1
+
+    admission_api.lists[("C0EXAMPLE3", None)] = {LISTED}
+    clock.now += TTL
+    assert gate.refusal(address="C0EXAMPLE3", adapter=None, callers=[STRANGER]) is (
+        DropReason.CALLER_NOT_ALLOWED
+    )
+
+
+def test_concurrent_questions_for_one_route_share_one_fetch(
+    admission_api: FakeAdmissionApi, store: _Store
+) -> None:
+    """Single-flight: a burst on one uncached route holds one API call, not one
+    per Bolt worker. Distinct routes still ask separately."""
+
+    admission_api.delay_s = 0.3
+    admission_api.lists[(CHANNEL, None)] = {LISTED}
+    gate = _gate(admission_api, _Clock(), store)
+    results: list[DropReason | None] = []
+    workers = [
+        threading.Thread(
+            target=lambda: results.append(
+                gate.refusal(address=CHANNEL, adapter=None, callers=[LISTED])
+            )
+        )
+        for _ in range(5)
+    ]
+    started = time.monotonic()
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    elapsed = time.monotonic() - started
+    assert results == [None] * 5
+    assert len(admission_api.requests) == 1
+    # Everyone waited for the one answer, not five answers in a row.
+    assert elapsed < 0.3 * 2
+
+
+def test_followers_of_a_failed_fetch_do_not_each_retry_the_dead_api(
+    admission_api: FakeAdmissionApi, store: _Store
+) -> None:
+    admission_api.delay_s = 0.3
+    admission_api.down = True
+    gate = _gate(admission_api, _Clock(), store)
+    results: list[DropReason | None] = []
+    workers = [
+        threading.Thread(
+            target=lambda: results.append(
+                gate.refusal(address=CHANNEL, adapter=None, callers=[STRANGER])
+            )
+        )
+        for _ in range(5)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert results == [DropReason.ADMISSION_UNAVAILABLE] * 5
+    assert len(admission_api.requests) == 1
+
+
+def test_a_refused_slack_caller_is_logged_at_debug_but_still_counted(
+    config: DispatcherConfig,
+    redis_client: redis.Redis,
+    admission_api: FakeAdmissionApi,
+    refused_metrics: tuple[MeterProvider, InMemoryMetricReader],
+) -> None:
+    admission_api.lists[(CHANNEL, None)] = {LISTED}
+    harness = _deliver(
+        config, redis_client, _events_api_request("env-dbg", "Ev-dbg", _mention(text="hi"))
+    )
+    refusals = [r for r in harness.records if "caller_not_allowed" in r.getMessage()]
+    assert [r.levelno for r in refusals] == [logging.DEBUG]
+    assert _refused_points(refused_metrics) == [
+        (1, {"service.name": "curie-dispatcher", "reason": "caller_not_allowed"})
+    ]
+
+
+def test_after_a_failed_fetch_nobody_asks_again_until_the_backoff_passes(
+    admission_api: FakeAdmissionApi, store: _Store
+) -> None:
+    """A hung or failing API costs one fetch per backoff window across every
+    route, not one per message, so the five Bolt workers are not all held."""
+
+    admission_api.down = True
+    clock = _Clock()
+    gate = _gate(admission_api, clock, store)
+    for address in ("C0EXAMPLE1", "C0EXAMPLE2", "C0EXAMPLE3"):
+        assert gate.refusal(address=address, adapter=None, callers=[STRANGER]) is (
+            DropReason.ADMISSION_UNAVAILABLE
+        )
+    assert len(admission_api.requests) == 1
+
+    admission_api.down = False
+    clock.now += 5.0
+    assert gate.refusal(address="C0EXAMPLE1", adapter=None, callers=[STRANGER]) is None
+    assert len(admission_api.requests) == 2

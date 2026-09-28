@@ -157,12 +157,16 @@ def drop(
     reason: DropReason,
     *,
     event_id: str,
+    level: int = logging.INFO,
     **extra: object,
 ) -> None:
-    """Record one refusal: exactly one INFO record naming the reason and its rationale.
+    """Record one refusal: exactly one record naming the reason and its rationale.
 
     Exactly one record per drop is the property the anti-silent-swallow suite
-    rests on, so this must not grow a second emit. Values are rendered with
+    rests on, so this must not grow a second emit. The record is INFO unless
+    the caller passes ``level``; only ``CALLER_NOT_ALLOWED`` does, at DEBUG,
+    because a busy shared channel can refuse most of its messages and the
+    ``curie.turn.refused`` counter already counts them. Values are rendered with
     ``%r`` so a newline or control character inside a Slack-supplied id cannot
     forge an extra log line; message bodies are never logged at all.
 
@@ -170,10 +174,12 @@ def drop(
         log: The dispatcher's injected logger -- the one the drop must land on.
         reason: The enumerated reason, whose value is the stable log token.
         event_id: The delivery's idempotency key, or "" when none exists yet.
+        level: The log level, INFO unless the reason is a routine refusal.
         **extra: Additional non-body context (a channel type, a subtype).
     """
     details = "".join(f" {key}={value!r}" for key, value in sorted(extra.items()))
-    log.info(
+    log.log(
+        level,
         "dropped inbound slack delivery %r: %s -- %s%s",
         event_id,
         reason.value,

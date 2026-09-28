@@ -30,6 +30,7 @@ Env mapping:
     CURIE_API_PREFLIGHT_TIMEOUT_SECONDS -> api_preflight_timeout_s
     CURIE_ADMISSION_CACHE_TTL_SECONDS -> admission_cache_ttl_s
     CURIE_ADMISSION_STALE_SECONDS     -> admission_stale_s
+    CURIE_ADMISSION_CACHE_PREFIX      -> admission_cache_prefix
     CURIE_HEARTBEAT_FILE             -> heartbeat_file
     CURIE_HEARTBEAT_INTERVAL_SECONDS -> heartbeat_interval_s
 """
@@ -175,6 +176,13 @@ class DispatcherConfig(BaseSettings):
         gt=0,
         allow_inf_nan=False,
         validation_alias="CURIE_ADMISSION_STALE_SECONDS",
+    )
+    # Where the admission answers persist in Valkey, so a restarted dispatcher
+    # keeps them (every key expires with the stale window). A prefix for the
+    # same reason `dedupe_prefix` is one: two installs sharing a Valkey must not
+    # read each other's answers.
+    admission_cache_prefix: str = Field(
+        default="curie:admission:", validation_alias="CURIE_ADMISSION_CACHE_PREFIX"
     )
 
     placeholder_text: str = Field(

@@ -247,7 +247,17 @@ def _refused_caller(
     )
     if reason is None:
         return False
-    drop(log, reason, event_id=event_id, lane=lane)
+    # A refused caller is logged at DEBUG: in a busy shared channel most
+    # people may be unlisted, and one INFO line per message would drown the
+    # log. The counter below still counts every refusal. An unavailable API is
+    # an outage signal and stays at INFO.
+    drop(
+        log,
+        reason,
+        event_id=event_id,
+        level=logging.DEBUG if reason is DropReason.CALLER_NOT_ALLOWED else logging.INFO,
+        lane=lane,
+    )
     record_metric(
         "curie.turn.refused",
         attributes={"service.name": "curie-dispatcher", "reason": reason.value},
@@ -653,7 +663,7 @@ def register_handlers(
     so they share one cache."""
 
     approval_resolver = resolver if resolver is not None else build_resolver(config)
-    admission_gate = admission if admission is not None else build_admission(config)
+    admission_gate = admission if admission is not None else build_admission(config, redis_client)
     # Resolved once here rather than per listener: the lane filter below drops
     # outside `process_event`, so it needs a logger of its own, and the injected
     # one is the single logger every drop must land on.

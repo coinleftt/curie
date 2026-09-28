@@ -122,9 +122,12 @@ satisfying the egress Protocol, or out of process over the HTTP wire.
   (`apps/dispatcher/src/curie_dispatcher/admission.py::AdmissionGate`) after its
   own filters and before `claim_event`, on mentions, direct messages and
   turn-starting clicks, with the sender (plus the bot id when a bot sent it) or the
-  clicking user. It caches answers per route for 30 seconds, keeps using an
-  expired answer for up to 5 minutes while the API cannot answer, and refuses a
-  cold miss during an outage. A refused caller gets no placeholder and no reply;
+  clicking user. It caches answers per route for 30 seconds in memory and in
+  Valkey (so a restart keeps them), keeps using an expired answer for up to 5
+  minutes while the API cannot answer, and refuses a cold miss during an outage
+  unless its last answer, within those 5 minutes, said no binding on the install
+  carries a list. An API that predates the admission route (FastAPI's route-miss
+  404) has no lists, so the dispatcher admits. A refused caller gets no placeholder and no reply;
   the dispatcher logs `caller_not_allowed` or `admission_unavailable`, and both
   services count `curie.turn.refused`. The list is set with
   `PUT /agents/{agent_id}/channels/callers`, which leaves the binding generation,

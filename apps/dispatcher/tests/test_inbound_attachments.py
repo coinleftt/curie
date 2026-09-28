@@ -98,7 +98,7 @@ def _mint(
         redis_client=redis_client,
         config=config,
         slack_identity=DEFAULT_IDENTITY,
-        admission=build_admission(config),
+        admission=build_admission(config, redis_client),
     )
     assert stream_id is not None, "the delivery must be enqueued, not refused"
     entries = redis_client.xrange(config.stream)

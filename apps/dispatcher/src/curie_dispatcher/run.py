@@ -111,7 +111,7 @@ def build_identity_connections(
     # One caller-list cache for the whole process (ADR 0175): its keys carry
     # the identity, so sharing it costs nothing and saves each identity's app
     # from asking the API about a route another identity already asked about.
-    admission = build_admission(config)
+    admission = build_admission(config, redis_client)
     for preflighted in identities:
         credentials = preflighted.credentials
         web_client = build_web_client(config, credentials)
