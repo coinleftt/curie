@@ -44,6 +44,7 @@ ACQUISITION_ACTIONS = frozenset(
 RETRY_ALLOWLIST = frozenset(
     {
         ("ci.yaml", "python", "Install uv"),
+        ("ci.yaml", "python-pytest", "Install uv"),
         ("fix-pin.yaml", "fix-pin", "Install uv"),
         ("ci.yaml", "e2e-ladder-cluster", "Create the kind cluster"),
         ("ci.yaml", "e2e-cluster-upgrade-matrix", "Create the disposable kind cluster"),
@@ -84,7 +85,7 @@ RETRY_ALLOWLIST = frozenset(
 # disappearing, not merely notice it acquiring a retry.
 PROTECTED_STEPS = frozenset(
     {
-        ("ci.yaml", "python", "Pytest"),
+        ("ci.yaml", "python-pytest", "Pytest"),
         ("ci.yaml", "python", "Docs gate (catalog drift + agent contract + citations)"),
         ("ci.yaml", "rust", "Test"),
         ("ci.yaml", "ui", "Lint"),
@@ -171,8 +172,8 @@ SHELL_KEYWORDS = frozenset({"do", "done", "fi", "then", "else", "esac", "true", 
 # deliberate decision with the same weight as adding one to RETRY_ALLOWLIST.
 RUN_RETRY_EXEMPT: frozenset[tuple[str, str, str]] = frozenset(
     {
-        ("ci.yaml", "python", "Wait for Langfuse to serve"),
-        # The fix pin job boots the same dev stack as the python job,
+        ("ci.yaml", "python-pytest", "Wait for Langfuse to serve"),
+        # The fix pin job boots the same dev stack as the pytest shards,
         # for the same reason and with the same readiness poll: Langfuse
         # web has no compose healthcheck, so `--wait` returns while it is
         # merely running. A readiness poll for an external service, not a

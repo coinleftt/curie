@@ -1230,9 +1230,11 @@ class TestRustValkeyWorkflowContract:
 class TestPythonValkeyWorkflowContract:
     def test_python_job_requires_valkey_guarded_tests(self):
         workflow = yaml.safe_load(CI_YAML.read_text())
-        python = workflow["jobs"]["python"]
+        # The suite runs in the pytest shards; the required Python job only
+        # aggregates them.
+        shards = workflow["jobs"]["python-pytest"]
 
-        assert python["env"]["CI_REQUIRE_VALKEY_TESTS"] == "1"
+        assert shards["env"]["CI_REQUIRE_VALKEY_TESTS"] == "1"
 
 
 class TestHelmCiCheckRunNames:
@@ -1763,6 +1765,9 @@ class TestLegitimateSkips:
             "e2e-ladder-release": (
                 "${{ needs.changes.outputs.local_release == 'true' }}"
             ),
+            # Not a tier gate: the required Python job waits on its pytest
+            # shards and must still run and report whatever they concluded.
+            "python": "always()",
         }
 
         assert actual == expected, (
