@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
@@ -923,7 +922,7 @@ def test_workflow_consumes_each_selection_output_exactly() -> None:
     )
     assert "if" not in jobs["e2e-cluster-upgrade-matrix-shards"]
     assert jobs["images"]["if"] == "${{ needs.changes.outputs.images == 'true' }}"
-    assert jobs["worker-local-image"]["if"] == jobs["images"]["if"]
+    assert "worker-local-image" not in jobs
     assert jobs["dispatcher-image-smoke"]["if"] == jobs["images"]["if"]
     assert jobs["mail-adapter-image-smoke"]["if"] == jobs["images"]["if"]
     assert jobs["ui-image-smoke"]["if"] == jobs["images"]["if"]
@@ -963,6 +962,7 @@ def test_upgrade_matrix_workflow_runs_one_job_per_shard() -> None:
         "rust-build",
         "changes",
         "e2e-cluster-upgrade-matrix-shards",
+        "ci-images",
     }
     assert job["if"] == "${{ needs.changes.outputs.released_upgrade == 'true' }}"
     assert job["timeout-minutes"] == 45
@@ -995,56 +995,41 @@ def test_upgrade_matrix_workflow_runs_one_job_per_shard() -> None:
     assert "kind delete cluster --name curie-upgrade-matrix" in teardown["run"]
     assert "kind delete cluster --name curie-upgrade " not in teardown["run"]
 
-    # #2733: one parallel bake replaces five serial image builds. The script
-    # retags matrix-candidate from local docker and kind-loads exclusive tags
-    # itself, so the workflow-level kind load of matrix-candidate is gone.
+    # #2733: the script retags matrix-candidate from local docker and
+    # kind-loads exclusive tags itself, so the workflow-level kind load of
+    # matrix-candidate is gone. The candidate images are built once per run by
+    # the ci-images job; a shard only loads and tags them.
     assert not any(
-        str(step.get("uses", "")).startswith("docker/build-push-action@")
+        str(step.get("uses", "")).startswith(
+            ("docker/build-push-action@", "docker/bake-action@", "docker/setup-buildx-action@")
+        )
         for step in job["steps"]
     )
     assert "Load candidate images into the kind cluster" not in named_steps
     assert not any(
         "kind load" in str(step.get("run", "")) for step in job["steps"]
     )
-    builder = named_steps["Set up a cache-only buildx builder (named, NOT the default)"]
-    assert builder["with"]["use"] is False
-    bake = named_steps["Build the candidate images locally in parallel"]
-    assert bake["uses"].startswith("docker/bake-action@")
-    assert len(bake["uses"].split("@", 1)[1].split()[0]) == 40
-    assert bake["with"]["builder"] == "${{ steps.matrixcache.outputs.name }}"
-    assert bake["with"]["load"] is True
-    assert bake["with"]["push"] is False
-    assert bake["with"]["files"] == "matrix-bake.json"
-    assert bake["with"]["source"] == "."
-    writer = named_steps["Write the candidate image bake definition"]["run"]
-    body = writer.split("<<'EOF'\n", 1)[1].rsplit("\nEOF", 1)[0]
-    definition = json.loads(body)
-    targets = definition["target"]
-    assert set(definition["group"]["default"]["targets"]) == set(targets)
-    expected = {
-        "api": "apps/api/Dockerfile",
-        "dispatcher": "apps/dispatcher/Dockerfile",
-        "worker": "apps/worker/Dockerfile",
-        "ui": "apps/ui/Dockerfile",
-        "runner": "runner/Dockerfile",
-    }
-    assert set(targets) == set(expected)
-    for component, dockerfile in expected.items():
-        target = targets[component]
-        assert target["context"] == "."
-        assert target["dockerfile"] == dockerfile
-        assert target["tags"] == [f"curie-{component}:matrix-candidate"]
-        assert target["cache-from"] == [f"type=gha,scope=ladder-{component}"]
-        assert target["cache-to"] == [f"type=gha,mode=max,scope=ladder-{component}"]
+    load = named_steps["Load the images built by the ci-images job"]
+    assert load["uses"] == "./.github/actions/load-ci-images"
+    assert load["with"]["images"] == "{api,dispatcher,worker,ui,runner}"
+    tag_run = named_steps["Tag the images as the matrix candidate"]["run"]
+    for component in ("api", "dispatcher", "worker", "ui", "runner"):
+        assert (
+            f"docker tag curie-ci/{component}:candidate "
+            f"curie-{component}:matrix-candidate"
+        ) in tag_run
     step_names = [step.get("name") for step in job["steps"]]
-    assert step_names.index(bake["name"]) < step_names.index(run_step["name"])
+    assert step_names.index(load["name"]) < step_names.index(
+        "Tag the images as the matrix candidate"
+    ) < step_names.index(run_step["name"])
+
 
 
 def test_released_upgrade_workflow_pins_issue_2194_runtime_contract() -> None:
     workflow = yaml.safe_load(WORKFLOW.read_text())
     jobs = workflow["jobs"]
     job = workflow["jobs"]["e2e-released-upgrade"]
-    assert set(job["needs"]) == {"rust-build", "changes"}
+    assert set(job["needs"]) == {"rust-build", "changes", "ci-images"}
 
     named_steps = {
         step["name"]: step for step in job["steps"] if isinstance(step.get("name"), str)
@@ -1061,14 +1046,12 @@ def test_released_upgrade_workflow_pins_issue_2194_runtime_contract() -> None:
         "ui": ("apps/ui/Dockerfile", "curie-ui:upgrade-candidate"),
         "runner": ("runner/Dockerfile", "curie-runner:upgrade-candidate"),
     }
-    for component, (dockerfile, tag) in candidate_images.items():
-        step = named_steps[f"Build the candidate {component} image locally"]
-        assert step["uses"].startswith("docker/build-push-action@")
-        assert step["with"]["context"] == "."
-        assert step["with"]["file"] == dockerfile
-        assert step["with"]["tags"] == tag
-        assert step["with"]["push"] is False
-        assert step["with"]["load"] is True
+    load_images = named_steps["Load the images built by the ci-images job"]
+    assert load_images["uses"] == "./.github/actions/load-ci-images"
+    assert load_images["with"]["images"] == "{api,dispatcher,worker,ui,runner}"
+    tag_run = named_steps["Tag the images as the upgrade candidate"]["run"]
+    for component, (_dockerfile, tag) in candidate_images.items():
+        assert f"docker tag curie-ci/{component}:candidate {tag}" in tag_run
 
     load_run = named_steps["Load candidate images into the kind cluster"]["run"]
     for _component, (_dockerfile, tag) in candidate_images.items():
@@ -1197,14 +1180,18 @@ def test_released_upgrade_workflow_pins_issue_2194_runtime_contract() -> None:
     assert len(negative_steps) == sum("name" in step for step in negative_job["steps"])
     for shared in (
         "Install Helm",
-        "Set up a cache-only buildx builder (named, NOT the default)",
-        "Build the candidate worker image locally",
         "Install Calico so NetworkPolicy is enforced",
         "Download and verify the exact public v0.8.2 chart",
         "Write the legacy retained values fixture",
         "Write the managed attester verifier",
     ):
         assert negative_steps[shared] == named_steps[shared], shared
+    negative_load = negative_steps["Load the worker image built by the ci-images job"]
+    assert negative_load["uses"] == "./.github/actions/load-ci-images"
+    assert negative_load["with"]["images"] == "worker"
+    assert negative_steps["Tag the worker image as the upgrade candidate"]["run"] == (
+        "docker tag curie-ci/worker:candidate curie-worker:upgrade-candidate"
+    )
     assert negative_job["steps"][0] == job["steps"][0]
     assert 'kind load docker-image curie-worker:upgrade-candidate' in negative_steps[
         "Load the candidate worker image into the kind cluster"

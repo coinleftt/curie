@@ -607,12 +607,149 @@ jobs:
           count=$(docker compose -f compose.release.yaml --profile full config --services | wc -l)
           [ "$count" -eq 14 ] || { echo "full profile must render 14 services, got $count" >&2; exit 1; }
 
-  # Build the first-party images on every PR/push -- build only, never push --
-  # so a Dockerfile break is caught here instead of only at release time. This
-  # mirrors release.yaml's build step (same contexts, same pinned actions, same
-  # gha layer cache) minus the registry login and push. All six images
-  # build from public bases (python/node/nginx), so no GHCR credentials are
-  # needed; the worker-local overlay is handled separately below.
+  # Build every image CI runs exactly once per workflow run, in one job, and
+  # hand the result to every consumer as an artifact. Before this job the same
+  # five images were rebuilt in about eight places per PR (each smoke job, each
+  # ladder rung, each released-upgrade job, and a five-image bake inside every
+  # upgrade matrix shard), so a broken Dockerfile failed up to fourteen jobs at
+  # once and every consumer paid for its own build. Now a Dockerfile break
+  # fails here, once, and the consumers skip.
+  #
+  # Build only, never pushed: pull requests from forks have no registry write
+  # access, so the images travel as `docker save` archives (zstd, one artifact
+  # per image, so a consumer downloads only what it needs). Consumers load them
+  # with the local `.github/actions/load-ci-images` action and `docker tag`
+  # the canonical `curie-ci/<name>:candidate` ref to whatever name their stack
+  # resolves.
+  #
+  # The builder is named and created with `use: false`, so the default `docker`
+  # driver stays current (#697/#791/#803): the worker-local overlay below is a
+  # plain `docker build` whose `FROM ghcr.io/curie-eng/curie-worker:ci-local`
+  # must resolve out of the local daemon image store, which only the default
+  # driver consults. The bake loads every image into that store. This job is
+  # the only writer of each gha cache scope, so `mode=max` never contends.
+  #
+  # It runs whenever any consumer runs: the image tier (smoke jobs and the
+  # toolchain proof) or any end to end tier.
+  ci-images:
+    name: Build CI images (no push)
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ needs.changes.outputs.images == 'true' || needs.changes.outputs.skill == 'true' || needs.changes.outputs.local == 'true' || needs.changes.outputs.local_release == 'true' || needs.changes.outputs.cluster == 'true' || needs.changes.outputs.released_upgrade == 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up a cache-only buildx builder (named, NOT the default -- preserves the overlay's FROM)
+        id: imagescache
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+        with:
+          use: false
+      - name: Write the CI image bake definition
+        run: |
+          cat > ci-images-bake.json <<'EOF'
+          {"group": {"default": {"targets": ["api", "dispatcher", "worker", "ui", "runner", "mail-adapter", "postgres-readiness"]}},
+          "target": {
+            "api": {"context": ".", "dockerfile": "apps/api/Dockerfile", "tags": ["curie-ci/api:candidate"], "cache-from": ["type=gha,scope=ladder-api"], "cache-to": ["type=gha,mode=max,scope=ladder-api"]},
+            "dispatcher": {"context": ".", "dockerfile": "apps/dispatcher/Dockerfile", "tags": ["curie-ci/dispatcher:candidate"], "cache-from": ["type=gha,scope=ladder-dispatcher"], "cache-to": ["type=gha,mode=max,scope=ladder-dispatcher"]},
+            "worker": {"context": ".", "dockerfile": "apps/worker/Dockerfile", "tags": ["curie-ci/worker:candidate", "ghcr.io/curie-eng/curie-worker:ci-local"], "cache-from": ["type=gha,scope=ladder-worker"], "cache-to": ["type=gha,mode=max,scope=ladder-worker"]},
+            "ui": {"context": ".", "dockerfile": "apps/ui/Dockerfile", "tags": ["curie-ci/ui:candidate"], "cache-from": ["type=gha,scope=ladder-ui"], "cache-to": ["type=gha,mode=max,scope=ladder-ui"]},
+            "runner": {"context": ".", "dockerfile": "runner/Dockerfile", "tags": ["curie-ci/runner:candidate"], "cache-from": ["type=gha,scope=ladder-runner"], "cache-to": ["type=gha,mode=max,scope=ladder-runner"]},
+            "mail-adapter": {"context": ".", "dockerfile": "apps/mail-adapter/Dockerfile", "tags": ["curie-ci/mail-adapter:candidate"], "cache-from": ["type=gha,scope=mail-adapter"], "cache-to": ["type=gha,mode=max,scope=mail-adapter"]},
+            "postgres-readiness": {"context": "charts/curie/ci", "dockerfile": "postgres-readiness-delay.Dockerfile", "tags": ["curie-ci/postgres-readiness:candidate"], "cache-from": ["type=gha,scope=langfuse-postgres-readiness"], "cache-to": ["type=gha,mode=max,scope=langfuse-postgres-readiness"]}
+          }}
+          EOF
+      - name: Build the CI images in parallel
+        uses: docker/bake-action@018cb6412ab401ebaa809aa5f85966b74628600f # v7.4.0
+        with:
+          builder: ${{ steps.imagescache.outputs.name }}
+          source: .
+          files: ci-images-bake.json
+          push: false
+          load: true
+      - name: Build the worker-local overlay on the local worker base
+        run: docker build --build-arg BASE_TAG=ci-local -t curie-ci/worker-local:candidate -f compose/worker-local.Dockerfile compose
+      - name: Save each image as its own archive
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/ci-images"
+          mkdir -p "$out"
+          for name in api dispatcher worker ui runner mail-adapter postgres-readiness worker-local; do
+            docker save "curie-ci/$name:candidate" | zstd -T0 -3 -q -o "$out/$name.tar.zst"
+          done
+          ls -la "$out"
+      - name: Upload the api image
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-image-api
+          path: ${{ runner.temp }}/ci-images/api.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload the dispatcher image
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-image-dispatcher
+          path: ${{ runner.temp }}/ci-images/dispatcher.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload the worker image
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-image-worker
+          path: ${{ runner.temp }}/ci-images/worker.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload the ui image
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-image-ui
+          path: ${{ runner.temp }}/ci-images/ui.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload the runner image
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-image-runner
+          path: ${{ runner.temp }}/ci-images/runner.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload the mail-adapter image
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-image-mail-adapter
+          path: ${{ runner.temp }}/ci-images/mail-adapter.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload the postgres-readiness image
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-image-postgres-readiness
+          path: ${{ runner.temp }}/ci-images/postgres-readiness.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Upload the worker-local image
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-image-worker-local
+          path: ${{ runner.temp }}/ci-images/worker-local.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  # The two example connectors are the only images CI does not run, and the
+  # only ones release.yaml publishes for a second architecture. They are
+  # validated here, build only, for both architectures: validating only amd64
+  # leaves an arm64-only Dockerfile failure to appear for the first time during
+  # a release, failing the release rather than the pull request that caused it.
+  # Nothing consumes them, so they are not in the ci-images job above, whose
+  # archives are native-architecture `docker save` output.
   images:
     name: Build ${{ matrix.name }} image (no push)
     runs-on: ubuntu-latest
@@ -622,23 +759,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: runner
-            context: .
-            dockerfile: runner/Dockerfile
-          - name: api
-            context: .
-            dockerfile: apps/api/Dockerfile
-          - name: dispatcher
-            context: .
-            dockerfile: apps/dispatcher/Dockerfile
-          - name: mail-adapter
-            dockerfile: apps/mail-adapter/Dockerfile
-          - name: worker
-            context: .
-            dockerfile: apps/worker/Dockerfile
-          - name: ui
-            context: .
-            dockerfile: apps/ui/Dockerfile
           - name: sre-bot-tempo
             context: examples/sre-bot/connectors/tempo
             dockerfile: examples/sre-bot/connectors/tempo/Dockerfile
@@ -651,10 +771,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      # Only reached by the entries that ask for a foreign architecture; a
-      # native-only build does not need the emulator and does not pay for it.
       - name: Set up QEMU
-        if: matrix.platforms
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - name: Set up Buildx
         uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
@@ -663,117 +780,38 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          # Empty for the platform images, which build for the runner's own
-          # architecture. The example connectors set both, because release.yaml
-          # publishes both and validating only amd64 leaves an arm64-only
-          # Dockerfile failure to appear for the first time during a release --
-          # failing the release rather than the pull request that caused it.
           platforms: ${{ matrix.platforms }}
           push: false
           load: false
-          # Scope the layer cache per image. Every leg of this matrix runs at
-          # once, and an unscoped `type=gha` puts all ten of them in ONE cache
-          # namespace, where they contend for the same reservation instead of
-          # sharing anything: the legs build different Dockerfiles, so there is
-          # no cross-image reuse to give up by separating them. Left unscoped,
-          # the export -- not the build -- became the job. On run 33690551116
-          # sre-bot-tempo built in 80.5s and then spent 1057.7s writing a single
-          # layer into the shared namespace, for a 19 minute job on a 2 minute
-          # image, while the same run logged `Unable to reserve cache with key
-          # docker.io--tonistiigi--binfmt-latest-linux-x64, another job may be
-          # creating this cache`. The ladder jobs below already scope their
-          # builds this way (`scope=ladder-runner`); this matrix was the one
-          # place left on the default.
+          # Scope the layer cache per image. Both legs run at once, and an
+          # unscoped `type=gha` puts them in ONE cache namespace, where they
+          # contend for the same reservation instead of sharing anything. On
+          # run 33690551116 sre-bot-tempo built in 80.5s and then spent 1057.7s
+          # writing a single layer into the shared namespace.
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
-
-  # The worker-local overlay is FROM the published curie-worker image, so it
-  # cannot be built purely from the checkout. Build the base worker image
-  # locally first and tag it exactly as the overlay's FROM ref, then build the
-  # overlay against it. Plain `docker build` uses the default buildx builder
-  # (docker driver), whose FROM lookup consults the local image store -- so the
-  # overlay resolves the just-built base with no GHCR pull, no registry auth,
-  # and works on any branch (including forks). Build only, never pushed.
-  #
-  # The base build is GHA-layer-cached off the SAME scope the `images` matrix
-  # writes for the worker image (`scope=worker`), via a named buildx builder
-  # that is NOT made the default (`use: false`) -- the mechanism the e2e-ladder
-  # job below documents at length (#697/#791/#803). `use: false` is load-bearing
-  # here: the overlay step is a plain `docker build` whose `FROM
-  # ...curie-worker:ci-local` must resolve out of the local daemon image store,
-  # which only the default `docker` driver consults. `load: true` puts the
-  # freshly built base into that store. Read-only cache (`cache-from` with no
-  # `cache-to`): the `images` matrix already refreshes `scope=worker` with
-  # `mode=max` on every run, and a second concurrent writer on one scope only
-  # contends for the reservation -- the exact failure the matrix comment above
-  # records. The overlay itself stays a plain `docker build`: it has no entry in
-  # the `images` matrix, so there is no scope for it to share.
-  worker-local-image:
-    name: Build worker-local overlay image (no push)
-    runs-on: ubuntu-latest
-    needs: [changes]
-    if: ${{ needs.changes.outputs.images == 'true' }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: Set up a cache-only buildx builder (named, NOT the default -- preserves the overlay's FROM)
-        id: buildcache
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
-        with:
-          use: false
-      - name: Build the base worker image locally (gha layer cache)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/worker/Dockerfile
-          builder: ${{ steps.buildcache.outputs.name }}
-          tags: ghcr.io/curie-eng/curie-worker:ci-local
-          push: false
-          load: true
-          cache-from: type=gha,scope=worker
-      - name: Build the worker-local overlay (no push)
-        run: docker build --build-arg BASE_TAG=ci-local -f compose/worker-local.Dockerfile compose
-
-  # The dispatcher image builds with `uv sync --no-editable`, so it installs
   # only the package's DECLARED dependencies. aci-protocol is a uv workspace
   # member imported by handlers.py/queue.py; if it is not declared in
   # apps/dispatcher/pyproject.toml it stays importable from a source checkout
   # but is absent from the isolated image venv, and the process crash-loops on
-  # startup (issue #428). The build-only `images` job above cannot catch this
-  # (it never runs the image). Build the real image and assert the entrypoint's
-  # imports resolve inside it -- the one place that gap is observable.
-  #
-  # GHA-layer-cached off the same scope the `images` matrix writes for this
-  # image (`scope=dispatcher`), read-only: the matrix refreshes it with
-  # `mode=max` every run, so a second writer would only contend. `load: true`
-  # is required -- the assertion step runs the built image. The builder is
-  # created with `use: false` so the default `docker` driver stays current,
-  # matching the ladder jobs and keeping any local-tag lookup working.
+  # startup (issue #428). The ci-images job only builds the image. Load that
+  # real image and assert the entrypoint's imports resolve inside it -- the one
+  # place that gap is observable.
   dispatcher-image-smoke:
     name: Dispatcher image imports resolve
     runs-on: ubuntu-latest
-    needs: [changes]
+    needs: [changes, ci-images]
     if: ${{ needs.changes.outputs.images == 'true' }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Set up a cache-only buildx builder (named, NOT the default)
-        id: buildcache
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - name: Load the dispatcher image built by the ci-images job
+        uses: ./.github/actions/load-ci-images
         with:
-          use: false
-      - name: Build the dispatcher image locally (gha layer cache)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/dispatcher/Dockerfile
-          builder: ${{ steps.buildcache.outputs.name }}
-          tags: curie-dispatcher:ci-smoke
-          push: false
-          load: true
-          cache-from: type=gha,scope=dispatcher
+          images: dispatcher
+      - name: Tag the dispatcher image for this smoke test
+        run: docker tag curie-ci/dispatcher:candidate curie-dispatcher:ci-smoke
       - name: Entrypoint imports resolve in the built image
         run: docker run --rm --entrypoint python curie-dispatcher:ci-smoke -c "import curie_dispatcher; import aci_protocol"
 
@@ -781,75 +819,50 @@ jobs:
   # `uv sync --no-editable`, so it installs only the package's DECLARED
   # dependencies: aci-protocol (a uv workspace member) and pydantic-settings
   # stay importable from a source checkout while being absent from the isolated
-  # image venv, and the process crash-loops on startup. The build-only `images`
-  # job above never runs the image, so this is the one place that is observable.
-  #
-  # GHA-layer-cached off `scope=mail-adapter`, the scope the `images` matrix
-  # writes for this image, read-only for the same reason as the dispatcher job.
-  # `context: .` is kept explicit here (it is what the plain `docker build` this
-  # replaces used); the matrix entry for mail-adapter omits `context`, so the
-  # two builds may not share every layer -- that pre-existing asymmetry is left
-  # alone rather than widened by this change.
+  # image venv, and the process crash-loops on startup. The ci-images job only
+  # builds the image, so this is the one place that is observable.
   mail-adapter-image-smoke:
     name: Mail adapter image imports resolve
     runs-on: ubuntu-latest
-    needs: [changes]
+    needs: [changes, ci-images]
     if: ${{ needs.changes.outputs.images == 'true' }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Set up a cache-only buildx builder (named, NOT the default)
-        id: buildcache
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - name: Load the mail-adapter image built by the ci-images job
+        uses: ./.github/actions/load-ci-images
         with:
-          use: false
-      - name: Build the mail adapter image locally (gha layer cache)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/mail-adapter/Dockerfile
-          builder: ${{ steps.buildcache.outputs.name }}
-          tags: curie-mail-adapter:ci-smoke
-          push: false
-          load: true
-          cache-from: type=gha,scope=mail-adapter
+          images: mail-adapter
+      - name: Tag the mail-adapter image for this smoke test
+        run: docker tag curie-ci/mail-adapter:candidate curie-mail-adapter:ci-smoke
       - name: Entrypoint imports resolve in the built image
         run: docker run --rm --entrypoint python curie-mail-adapter:ci-smoke -c "import curie_mail_adapter; import aci_protocol; import pydantic_settings"
 
   # The console UI image serves its build through an nginx template that lives
   # as a heredoc in apps/ui/Dockerfile, not as a checked-in config file, so
-  # nothing reviews it directly. The build-only `images` job above never runs
+  # nothing reviews it directly. The ci-images job only builds it and never runs
   # the image, and the Playwright suite previews the raw Vite build on port
   # 4273, bypassing nginx entirely. That leaves the built container as the
   # only place the served response headers, compression and cache behavior
-  # are observable at all. This job builds the real image, boots it, and pins
+  # are observable at all. This job loads the real image, boots it, and pins
   # those headers so a template regression fails CI instead of surfacing as a
   # production caching or compression bug.
   ui-image-smoke:
     name: UI image response headers are correct
     runs-on: ubuntu-latest
-    needs: [changes]
+    needs: [changes, ci-images]
     if: ${{ needs.changes.outputs.images == 'true' }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Set up a cache-only buildx builder (named, NOT the default)
-        id: buildcache
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - name: Load the ui image built by the ci-images job
+        uses: ./.github/actions/load-ci-images
         with:
-          use: false
-      - name: Build the UI image locally (gha layer cache)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/ui/Dockerfile
-          builder: ${{ steps.buildcache.outputs.name }}
-          tags: curie-ui:ci-smoke
-          push: false
-          load: true
-          cache-from: type=gha,scope=ui
+          images: ui
+      - name: Tag the ui image for this smoke test
+        run: docker tag curie-ci/ui:candidate curie-ui:ci-smoke
       - name: Start the stub API upstream
         run: |
           set -euo pipefail
@@ -1123,25 +1136,16 @@ jobs:
 
   # #2611: the Python job never builds curie-runner, so every container leg of
   # runner/tests/test_repo_toolchain_proof.py skips on that job. This is the
-  # missing half: it builds the runner image and runs the harness with
-  # CURIE_REPO_TOOLCHAIN_PROOF=required so an absent image is a failure
-  # rather than a skip. No `needs:` on the Python job -- the image build must
-  # not serialise behind the ~22 min suite (#2230).
-  #
-  # Runtime (stated for #2611): the `images` matrix runner leg is ~2 min
-  # cache-warm (104s on run 34590132629). This job repeats that build with
-  # `load: true` (read-only `scope=runner` cache, same as the smoke jobs) and
-  # then runs the harness (~39s locally in required mode, 14 passed). Wall
-  # clock grows only if this job exceeds Python.
-  #
-  # GHA-layer-cached off the same `scope=runner` the `images` matrix writes,
-  # read-only so the two writers do not contend. `load: true` because the
-  # harness `docker run`s the tag. The builder is created with `use: false`
-  # so the default `docker` driver stays current, matching the smoke jobs.
+  # missing half: it loads the runner image the ci-images job built and runs
+  # the harness with CURIE_REPO_TOOLCHAIN_PROOF=required so an absent image is
+  # a failure rather than a skip. No `needs:` on the Python job -- the proof
+  # must not serialise behind the ~22 min suite (#2230). The harness runs in
+  # ~39s locally in required mode (14 passed), so wall clock grows only if
+  # this job exceeds Python.
   repo-toolchain-proof:
     name: Repository toolchain proof (runner image)
     runs-on: ubuntu-latest
-    needs: [changes]
+    needs: [changes, ci-images]
     if: ${{ needs.changes.outputs.images == 'true' }}
     env:
       CURIE_REPO_TOOLCHAIN_PROOF: required
@@ -1179,21 +1183,12 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$output" | grep -F "may not skip"
-      - name: Set up a cache-only buildx builder (named, NOT the default)
-        id: buildcache
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - name: Load the runner image built by the ci-images job
+        uses: ./.github/actions/load-ci-images
         with:
-          use: false
-      - name: Build the runner image locally (gha layer cache)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: runner/Dockerfile
-          builder: ${{ steps.buildcache.outputs.name }}
-          tags: curie-runner
-          push: false
-          load: true
-          cache-from: type=gha,scope=runner
+          images: runner
+      - name: Tag the runner image as the harness default (curie-runner)
+        run: docker tag curie-ci/runner:candidate curie-runner
       - name: Repository toolchain proof
         env:
           CURIE_PROOF_EVIDENCE_DIR: ${{ runner.temp }}/repo-toolchain-proof
@@ -1213,15 +1208,13 @@ jobs:
   # control (each grader greens on a known-good exemplar) are grader-level and
   # ride the Rust job (cli/tests/eval_falsifiability.rs) -- the fake model can
   # only ever say "all done", so those cannot be expressed through this path.
-  # Reuses the release binary the Rust job already built and uploaded, and builds
-  # the runner image locally (no registry auth), GHA-layer-cached off
-  # `scope=runner` -- the same scope the `images` matrix writes for the runner.
-  # Read-only cache for the same reason as the smoke jobs above; `load: true`
-  # because the gate script runs a container from the tag.
+  # Reuses the release binary the Rust job already built and uploaded, and the
+  # runner image the ci-images job built (no registry auth); the gate script
+  # runs a container from the tag.
   eval-falsifiability:
     name: Eval falsifiability gate (fake model, offline)
     runs-on: ubuntu-latest
-    needs: [rust-build, changes]
+    needs: [rust-build, changes, ci-images]
     if: ${{ needs.changes.outputs.skill == 'true' }}
     steps:
       - uses: actions/checkout@v7
@@ -1234,21 +1227,12 @@ jobs:
           path: cli/target/release
       - name: Make the binary executable
         run: chmod +x cli/target/release/curie
-      - name: Set up a cache-only buildx builder (named, NOT the default)
-        id: buildcache
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - name: Load the runner image built by the ci-images job
+        uses: ./.github/actions/load-ci-images
         with:
-          use: false
-      - name: Build the runner image locally (gha layer cache)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: runner/Dockerfile
-          builder: ${{ steps.buildcache.outputs.name }}
-          tags: curie-runner
-          push: false
-          load: true
-          cache-from: type=gha,scope=runner
+          images: runner
+      - name: Tag the runner image as the harness default (curie-runner)
+        run: docker tag curie-ci/runner:candidate curie-runner
       - name: Falsifiability gate (every committed case must go RED against the fake model)
         env:
           CURIE_BIN: cli/target/release/curie
@@ -1288,8 +1272,8 @@ jobs:
   # private pull one layer down -- compose.dev.yaml threads the same
   # CURIE_BASE_TAG through as that build stanza's BASE_TAG arg (issue #698),
   # so one override variable drives all three. This job sets CURIE_BASE_TAG=
-  # ci-local (the same convention the `worker-local-image` job above already
-  # uses for its own base build) and tags its from-source builds to match,
+  # ci-local (the same convention the ci-images job above uses for its own
+  # worker-local overlay build) and tags the loaded images to match,
   # rather than retagging over whatever `:latest` meant in the local image
   # store before this job ran -- `:latest` is not shadowed. Both builds are
   # throwaway (this runner's Docker daemon is discarded at job end; nothing
@@ -1386,16 +1370,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 release/preserve_next.py --repo "$GITHUB_REPOSITORY"
 
-  # The three image builds here are GHA-layer-cached via a buildx builder that
-  # is created but NOT made the default (`setup-buildx-action` with
-  # `use: false`): two of the tags are consumed as Dockerfile FROM bases by a
-  # compose-triggered build later in the same job, which must stay on a plain
-  # `docker` builder to resolve them. See the build steps' own comment for the
-  # full history and why `use: false` is the fix (#697/#791/#803).
+  # The images are built once by the ci-images job and loaded here. Two of the
+  # tags are consumed as Dockerfile FROM bases by a compose-triggered build
+  # later in the same job, which must stay on a plain `docker` builder to
+  # resolve them (#697/#791/#803).
   e2e-ladder:
     name: E2E parity ladder (skill + local, fake model)
     runs-on: ubuntu-latest
-    needs: [rust-build, changes]
+    needs: [rust-build, changes, ci-images]
     # Skip on PRs that can't affect what the ladder tests (docs, UI-only, gtools,
     # non-ladder CI). Not a required check, so skipping never blocks a merge; it
     # just stops paying the ~2min image-build + rung cost when nothing it
@@ -1413,87 +1395,24 @@ jobs:
           path: cli/target/release
       - name: Make the binary executable
         run: chmod +x cli/target/release/curie
-      # The three from-scratch image builds below are GHA-layer-cached WITHOUT
-      # repointing the default buildx builder -- the exact mechanism the pre-#803
-      # revert note asked for. Two of these tags (curie-worker:ci-local,
-      # curie-api:ci-local) are consumed as Dockerfile FROM bases by a build
-      # that `docker compose` triggers itself a few steps down (the worker-local
-      # overlay via compose/worker-local.Dockerfile, inside `curie local up`),
-      # so that compose build MUST run on a plain `docker` builder that can see
-      # the locally-built `:ci-local` tags in the daemon store.
-      #
-      # History: #697 first added the GHA cache here with a bare
-      # docker/setup-buildx-action step; its default `use: true` made the
-      # docker-container builder the *current* builder, the compose-triggered
-      # build inherited it, and it could no longer resolve the `:ci-local` tags
-      # as a FROM ("failed to resolve source metadata ... not found"), reddening
-      # every run (#791/#803). The fix is the one line #697 lacked: `use: false`
-      # creates the container builder for the cache export but leaves the plain
-      # `docker` builder current, so the compose FROM still resolves. Each build
-      # below runs on the named builder explicitly (`builder:` input) with
-      # `load: true` to export the result into that same daemon store -- so both
-      # this job's steps and the compose FROM find the tags. Same pinned actions
-      # and gha cache as the `images` job above, which proves the token wiring.
-      # Validated locally (kind box): named builder never becomes default, the
-      # `FROM :ci-local` resolves, and a cache-warm runner build restores 9
-      # layers from cache alone (58s -> 15s) after wiping the builder.
-      - name: Set up a cache-only buildx builder (named, NOT the default -- preserves compose FROM, #803)
-        id: laddercache
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      # The images come from the ci-images job, which built them once for this
+      # run. Two of these tags (curie-worker:ci-local, curie-api:ci-local) are
+      # consumed as Dockerfile FROM bases by a build that `docker compose`
+      # triggers itself (the worker-local overlay, inside `curie local up`), so
+      # this job must leave the plain `docker` builder current and the tags in
+      # the daemon store; it creates no buildx builder at all (#697/#791/#803).
+      - name: Load the images built by the ci-images job
+        uses: ./.github/actions/load-ci-images
         with:
-          use: false
-      - name: Build the runner image locally (gha layer cache)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: runner/Dockerfile
-          builder: ${{ steps.laddercache.outputs.name }}
-          tags: curie-runner
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-runner
-          cache-to: type=gha,mode=max,scope=ladder-runner
-      - name: Retag the runner image for the compose worker (CURIE_RUNNER_IMAGE, no registry auth)
-        run: docker tag curie-runner ghcr.io/curie-eng/curie-runner:latest
-      # Tagged :ci-local (the worker-local-image job's own convention), not
-      # :latest -- compose.dev.yaml's CURIE_BASE_TAG override (set below) points
-      # curie-api/curie-migrate's `image:` and the worker-local overlay's
-      # BASE_TAG build arg at this tag directly, so this job no longer needs to
-      # retag its from-source builds over whatever `:latest` meant in the local
-      # Docker image store before this job ran.
-      - name: Build the api image locally (satisfies curie-api + curie-migrate, no registry auth)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/api/Dockerfile
-          builder: ${{ steps.laddercache.outputs.name }}
-          tags: ghcr.io/curie-eng/curie-api:ci-local
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-api
-          cache-to: type=gha,mode=max,scope=ladder-api
-      - name: Build the worker base image locally (satisfies the worker-local overlay's FROM, no registry auth)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/worker/Dockerfile
-          builder: ${{ steps.laddercache.outputs.name }}
-          tags: ghcr.io/curie-eng/curie-worker:ci-local
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-worker
-          cache-to: type=gha,mode=max,scope=ladder-worker
-      - name: Build the dispatcher image locally (one-shot local message producer, no registry auth)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/dispatcher/Dockerfile
-          builder: ${{ steps.laddercache.outputs.name }}
-          tags: ghcr.io/curie-eng/curie-dispatcher:latest
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-dispatcher
-          cache-to: type=gha,mode=max,scope=ladder-dispatcher
+          images: "{runner,api,worker,dispatcher}"
+      - name: Tag the images for the local compose stack (no registry auth)
+        run: |
+          set -euo pipefail
+          docker tag curie-ci/runner:candidate curie-runner
+          docker tag curie-ci/runner:candidate ghcr.io/curie-eng/curie-runner:latest
+          docker tag curie-ci/api:candidate ghcr.io/curie-eng/curie-api:ci-local
+          docker tag curie-ci/worker:candidate ghcr.io/curie-eng/curie-worker:ci-local
+          docker tag curie-ci/dispatcher:candidate ghcr.io/curie-eng/curie-dispatcher:latest
       - name: Parity ladder (skill + local rungs, fake model, credential-free)
         env:
           CURIE_BIN: cli/target/release/curie
@@ -1504,15 +1423,12 @@ jobs:
   # LOCAL-RELEASE RUNG -- split into its own job (issue #695 follow-up) so it
   # runs in PARALLEL with the skill+local rung above instead of appended after
   # it, taking the release round trip off the ladder's critical path
-  # (~30-50s wall-clock). A fresh runner shares no Docker daemon with e2e-ladder
-  # so it must rebuild the images; the shared GHA layer cache defuses that --
-  # these builds reuse the same cache scopes as the other ladder jobs, so on a
-  # warm cache they cost the --load export, not a full
-  # rebuild. Uses the same use:false / build-push-action mechanism.
+  # (~30-50s wall-clock). A fresh runner shares no Docker daemon with e2e-ladder,
+  # so it loads the images the ci-images job built once for this run.
   e2e-ladder-release:
     name: E2E parity ladder (local-release, fake model)
     runs-on: ubuntu-latest
-    needs: [rust-build, changes]
+    needs: [rust-build, changes, ci-images]
     if: ${{ needs.changes.outputs.local_release == 'true' }}
     steps:
       - uses: actions/checkout@v7
@@ -1525,78 +1441,24 @@ jobs:
           path: cli/target/release
       - name: Make the binary executable
         run: chmod +x cli/target/release/curie
-      # Cache-only named builder (use: false) so the worker-local overlay's
-      # `FROM :ci-local` (a plain `docker build` below) still resolves on the
-      # default builder -- the same #803-safe mechanism the e2e-ladder job
-      # documents in full.
-      - name: Set up a cache-only buildx builder (named, NOT the default -- #803)
-        id: releasecache
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - name: Load the images built by the ci-images job
+        uses: ./.github/actions/load-ci-images
         with:
-          use: false
-      - name: Build the runner image locally (gha layer cache)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: runner/Dockerfile
-          builder: ${{ steps.releasecache.outputs.name }}
-          tags: curie-runner
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-runner
-          cache-to: type=gha,mode=max,scope=ladder-runner
-      - name: Retag the runner image for the compose worker (CURIE_RUNNER_IMAGE, no registry auth)
-        run: docker tag curie-runner ghcr.io/curie-eng/curie-runner:latest
-      - name: Build the api image locally (satisfies curie-api + curie-migrate, no registry auth)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/api/Dockerfile
-          builder: ${{ steps.releasecache.outputs.name }}
-          tags: ghcr.io/curie-eng/curie-api:ci-local
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-api
-          cache-to: type=gha,mode=max,scope=ladder-api
-      - name: Build the worker base image locally (satisfies the worker-local overlay's FROM, no registry auth)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/worker/Dockerfile
-          builder: ${{ steps.releasecache.outputs.name }}
-          tags: ghcr.io/curie-eng/curie-worker:ci-local
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-worker
-          cache-to: type=gha,mode=max,scope=ladder-worker
-      - name: Build the dispatcher image locally (one-shot local message producer, no registry auth)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/dispatcher/Dockerfile
-          builder: ${{ steps.releasecache.outputs.name }}
-          tags: ghcr.io/curie-eng/curie-dispatcher:latest
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-dispatcher
-          cache-to: type=gha,mode=max,scope=ladder-dispatcher
-      - name: Build the ui image locally (satisfies the generated release compose, no registry auth)
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/ui/Dockerfile
-          builder: ${{ steps.releasecache.outputs.name }}
-          tags: ghcr.io/curie-eng/curie-ui:latest
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-ui
-          cache-to: type=gha,mode=max,scope=ladder-ui
-      - name: Tag the api image for the generated release compose (ghcr.io/curie-eng/curie-api:latest, no registry auth)
-        run: docker tag ghcr.io/curie-eng/curie-api:ci-local ghcr.io/curie-eng/curie-api:latest
-      - name: Build the worker-local overlay for the generated release compose (ghcr.io/curie-eng/curie-worker-local:latest, no registry auth)
-        run: docker build --build-arg BASE_TAG=ci-local -t ghcr.io/curie-eng/curie-worker-local:latest -f compose/worker-local.Dockerfile compose
-      - name: Build any remaining release-compose images the selected profile requires
-        run: python3 compose/ensure_release_images.py --profiles full --build-missing
+          images: "{runner,api,worker,dispatcher,ui,mail-adapter,worker-local}"
+      - name: Tag the images for the generated release compose (no registry auth)
+        run: |
+          set -euo pipefail
+          docker tag curie-ci/runner:candidate curie-runner
+          docker tag curie-ci/runner:candidate ghcr.io/curie-eng/curie-runner:latest
+          docker tag curie-ci/api:candidate ghcr.io/curie-eng/curie-api:ci-local
+          docker tag curie-ci/api:candidate ghcr.io/curie-eng/curie-api:latest
+          docker tag curie-ci/worker:candidate ghcr.io/curie-eng/curie-worker:ci-local
+          docker tag curie-ci/dispatcher:candidate ghcr.io/curie-eng/curie-dispatcher:latest
+          docker tag curie-ci/ui:candidate ghcr.io/curie-eng/curie-ui:latest
+          docker tag curie-ci/mail-adapter:candidate ghcr.io/curie-eng/curie-mail-adapter:latest
+          docker tag curie-ci/worker-local:candidate ghcr.io/curie-eng/curie-worker-local:latest
+      - name: Every release-compose image the selected profile requires is present
+        run: python3 compose/ensure_release_images.py --profiles full | xargs docker image inspect --format '{{.Id}} {{index .RepoTags 0}}'
       - name: Parity ladder (local-release rung against generated compose.release.yaml, fake model, credential-free)
         env:
           CURIE_BIN: cli/target/release/curie
@@ -1635,8 +1497,8 @@ jobs:
   # so `cluster deploy`'s NodePort discovery (which resolves the loopback
   # kubeconfig host) reaches the API through the UI proxy.
   #
-  # Images: the four the cluster path needs (api, worker, ui, runner) are built
-  # locally and `kind load`ed into the node store, then the install overrides
+  # Images: the four the cluster path needs (api, worker, ui, runner) come from the
+  # ci-images job and are `kind load`ed into the node store, then the install overrides
   # each image to the loaded tag with pullPolicy Never (mirroring
   # charts/curie/values-dev.yaml's offline posture) so the cluster never
   # reaches for the private GHCR refs it has no credentials for. The dispatcher
@@ -1727,7 +1589,7 @@ jobs:
   e2e-ladder-cluster:
     name: E2E parity ladder (cluster rung on kind, fake model)
     runs-on: ubuntu-latest
-    needs: [rust-build, changes]
+    needs: [rust-build, changes, ci-images]
     if: ${{ needs.changes.outputs.cluster == 'true' }}
     steps:
       - uses: actions/checkout@v7
@@ -1744,72 +1606,23 @@ jobs:
         uses: azure/setup-helm@v5.0.1
         with:
           version: v3.16.4
-      # GHA-layer-cached builds via a named buildx builder that is NOT made the
-      # default (`use: false`), same mechanism the `e2e-ladder` job documents.
-      # `load: true` exports each image into the local daemon store so `kind
-      # load` picks it up with no registry round trip. The four product images
-      # drive the cluster round trip; a fifth fixture image delays Postgres for
-      # the Langfuse startup regression. The dispatcher is not deployed.
-      - name: Set up a cache-only buildx builder (named, NOT the default)
-        id: clustercache
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      # The images come from the ci-images job, which built them once for this
+      # run; they are loaded into the local daemon store so `kind load` picks
+      # them up with no registry round trip. The four product images drive the
+      # cluster round trip; a fifth fixture image delays Postgres for the
+      # Langfuse startup regression. The dispatcher is not deployed.
+      - name: Load the images built by the ci-images job
+        uses: ./.github/actions/load-ci-images
         with:
-          use: false
-      - name: Build the api image locally
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/api/Dockerfile
-          builder: ${{ steps.clustercache.outputs.name }}
-          tags: curie-api:local
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-api
-          cache-to: type=gha,mode=max,scope=ladder-api
-      - name: Build the worker image locally
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/worker/Dockerfile
-          builder: ${{ steps.clustercache.outputs.name }}
-          tags: curie-worker:local
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-worker
-          cache-to: type=gha,mode=max,scope=ladder-worker
-      - name: Build the ui image locally
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/ui/Dockerfile
-          builder: ${{ steps.clustercache.outputs.name }}
-          tags: curie-ui:local
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-ui
-          cache-to: type=gha,mode=max,scope=ladder-ui
-      - name: Build the runner image locally
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: runner/Dockerfile
-          builder: ${{ steps.clustercache.outputs.name }}
-          tags: curie-runner:latest
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-runner
-          cache-to: type=gha,mode=max,scope=ladder-runner
-      - name: Build the delayed Postgres readiness fixture locally
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: charts/curie/ci
-          file: charts/curie/ci/postgres-readiness-delay.Dockerfile
-          builder: ${{ steps.clustercache.outputs.name }}
-          tags: curie-postgres-readiness:${{ github.sha }}
-          push: false
-          load: true
-          cache-from: type=gha,scope=langfuse-postgres-readiness
-          cache-to: type=gha,mode=max,scope=langfuse-postgres-readiness
+          images: "{api,worker,ui,runner,postgres-readiness}"
+      - name: Tag the images for the kind node store
+        run: |
+          set -euo pipefail
+          docker tag curie-ci/api:candidate curie-api:local
+          docker tag curie-ci/worker:candidate curie-worker:local
+          docker tag curie-ci/ui:candidate curie-ui:local
+          docker tag curie-ci/runner:candidate curie-runner:latest
+          docker tag curie-ci/postgres-readiness:candidate "curie-postgres-readiness:${GITHUB_SHA}"
       # kind config: map the UI NodePort (chart default 30080) to the host so
       # `cluster deploy`'s UI `/api` NodePort discovery -- which resolves the
       # loopback kubeconfig host (127.0.0.1) -- reaches the in-cluster API.
@@ -2078,7 +1891,7 @@ jobs:
   e2e-released-upgrade:
     name: E2E released chart upgrade (released install to candidate)
     runs-on: ubuntu-latest
-    needs: [rust-build, changes]
+    needs: [rust-build, changes, ci-images]
     if: ${{ needs.changes.outputs.released_upgrade == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -2095,66 +1908,18 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.16.4
-      - name: Set up a cache-only buildx builder (named, NOT the default)
-        id: upgradecache
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - name: Load the images built by the ci-images job
+        uses: ./.github/actions/load-ci-images
         with:
-          use: false
-      - name: Build the candidate api image locally
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/api/Dockerfile
-          builder: ${{ steps.upgradecache.outputs.name }}
-          tags: curie-api:upgrade-candidate
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-api
-          cache-to: type=gha,mode=max,scope=ladder-api
-      - name: Build the candidate dispatcher image locally
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/dispatcher/Dockerfile
-          builder: ${{ steps.upgradecache.outputs.name }}
-          tags: curie-dispatcher:upgrade-candidate
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-dispatcher
-          cache-to: type=gha,mode=max,scope=ladder-dispatcher
-      - name: Build the candidate worker image locally
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/worker/Dockerfile
-          builder: ${{ steps.upgradecache.outputs.name }}
-          tags: curie-worker:upgrade-candidate
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-worker
-          cache-to: type=gha,mode=max,scope=ladder-worker
-      - name: Build the candidate ui image locally
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/ui/Dockerfile
-          builder: ${{ steps.upgradecache.outputs.name }}
-          tags: curie-ui:upgrade-candidate
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-ui
-          cache-to: type=gha,mode=max,scope=ladder-ui
-      - name: Build the candidate runner image locally
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: runner/Dockerfile
-          builder: ${{ steps.upgradecache.outputs.name }}
-          tags: curie-runner:upgrade-candidate
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-runner
-          cache-to: type=gha,mode=max,scope=ladder-runner
+          images: "{api,dispatcher,worker,ui,runner}"
+      - name: Tag the images as the upgrade candidate
+        run: |
+          set -euo pipefail
+          docker tag curie-ci/api:candidate curie-api:upgrade-candidate
+          docker tag curie-ci/dispatcher:candidate curie-dispatcher:upgrade-candidate
+          docker tag curie-ci/worker:candidate curie-worker:upgrade-candidate
+          docker tag curie-ci/ui:candidate curie-ui:upgrade-candidate
+          docker tag curie-ci/runner:candidate curie-runner:upgrade-candidate
       - name: Write the kind cluster config
         run: |
           cat > kind-upgrade-config.yaml <<'EOF'
@@ -2505,7 +2270,7 @@ jobs:
   e2e-released-upgrade-negative:
     name: E2E released chart upgrade negative control (nil unsafe helpers)
     runs-on: ubuntu-latest
-    needs: [rust-build, changes]
+    needs: [rust-build, changes, ci-images]
     if: ${{ needs.changes.outputs.released_upgrade == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -2515,22 +2280,12 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.16.4
-      - name: Set up a cache-only buildx builder (named, NOT the default)
-        id: upgradecache
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - name: Load the worker image built by the ci-images job
+        uses: ./.github/actions/load-ci-images
         with:
-          use: false
-      - name: Build the candidate worker image locally
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: apps/worker/Dockerfile
-          builder: ${{ steps.upgradecache.outputs.name }}
-          tags: curie-worker:upgrade-candidate
-          push: false
-          load: true
-          cache-from: type=gha,scope=ladder-worker
-          cache-to: type=gha,mode=max,scope=ladder-worker
+          images: worker
+      - name: Tag the worker image as the upgrade candidate
+        run: docker tag curie-ci/worker:candidate curie-worker:upgrade-candidate
       - name: Write the kind cluster config
         run: |
           cat > kind-upgrade-negative-config.yaml <<'EOF'
@@ -2687,7 +2442,7 @@ jobs:
     name: E2E cluster upgrade matrix (${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: [rust-build, changes, e2e-cluster-upgrade-matrix-shards]
+    needs: [rust-build, changes, e2e-cluster-upgrade-matrix-shards, ci-images]
     if: ${{ needs.changes.outputs.released_upgrade == 'true' }}
     strategy:
       fail-fast: false
@@ -2712,34 +2467,18 @@ jobs:
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.16.4
-      - name: Set up a cache-only buildx builder (named, NOT the default)
-        id: matrixcache
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+      - name: Load the images built by the ci-images job
+        uses: ./.github/actions/load-ci-images
         with:
-          use: false
-      # One parallel bake of all five candidate images (#2733); the serial
-      # builds cost ~3m15s per shard. Tags, Dockerfiles and gha cache scopes
-      # match the previous per-image build steps.
-      - name: Write the candidate image bake definition
+          images: "{api,dispatcher,worker,ui,runner}"
+      - name: Tag the images as the matrix candidate
         run: |
-          cat > matrix-bake.json <<'EOF'
-          {"group": {"default": {"targets": ["api", "dispatcher", "worker", "ui", "runner"]}},
-          "target": {
-            "api": {"context": ".", "dockerfile": "apps/api/Dockerfile", "tags": ["curie-api:matrix-candidate"], "cache-from": ["type=gha,scope=ladder-api"], "cache-to": ["type=gha,mode=max,scope=ladder-api"]},
-            "dispatcher": {"context": ".", "dockerfile": "apps/dispatcher/Dockerfile", "tags": ["curie-dispatcher:matrix-candidate"], "cache-from": ["type=gha,scope=ladder-dispatcher"], "cache-to": ["type=gha,mode=max,scope=ladder-dispatcher"]},
-            "worker": {"context": ".", "dockerfile": "apps/worker/Dockerfile", "tags": ["curie-worker:matrix-candidate"], "cache-from": ["type=gha,scope=ladder-worker"], "cache-to": ["type=gha,mode=max,scope=ladder-worker"]},
-            "ui": {"context": ".", "dockerfile": "apps/ui/Dockerfile", "tags": ["curie-ui:matrix-candidate"], "cache-from": ["type=gha,scope=ladder-ui"], "cache-to": ["type=gha,mode=max,scope=ladder-ui"]},
-            "runner": {"context": ".", "dockerfile": "runner/Dockerfile", "tags": ["curie-runner:matrix-candidate"], "cache-from": ["type=gha,scope=ladder-runner"], "cache-to": ["type=gha,mode=max,scope=ladder-runner"]}
-          }}
-          EOF
-      - name: Build the candidate images locally in parallel
-        uses: docker/bake-action@018cb6412ab401ebaa809aa5f85966b74628600f # v7.4.0
-        with:
-          builder: ${{ steps.matrixcache.outputs.name }}
-          source: .
-          files: matrix-bake.json
-          push: false
-          load: true
+          set -euo pipefail
+          docker tag curie-ci/api:candidate curie-api:matrix-candidate
+          docker tag curie-ci/dispatcher:candidate curie-dispatcher:matrix-candidate
+          docker tag curie-ci/worker:candidate curie-worker:matrix-candidate
+          docker tag curie-ci/ui:candidate curie-ui:matrix-candidate
+          docker tag curie-ci/runner:candidate curie-runner:matrix-candidate
       - name: Write the kind cluster config
         run: |
           cat > kind-upgrade-matrix-config.yaml <<'EOF'
