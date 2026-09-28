@@ -1136,6 +1136,21 @@ fn local_rung_honors_isolated_compose_project_and_ordered_files() {
 }
 
 #[test]
+fn local_release_teardown_uses_the_same_project_and_override_as_startup() {
+    let rung = ladder_function("rung_local_release");
+    let teardown = rung
+        .split("=== curie local down -f compose.release.yaml ===")
+        .nth(1)
+        .expect("local release teardown must be present");
+    assert!(
+        teardown.contains("local down --project \"$COMPOSE_PROJECT\" -f \"$release_compose\"")
+            && teardown.contains("down_args+=(-f \"${COMPOSE_FILES[$extra_i]}\")")
+            && teardown.contains("\"$BIN\" \"${down_args[@]}\""),
+        "local release teardown must pass the selected project, generated release compose, and every private override to the CLI"
+    );
+}
+
+#[test]
 fn connector_local_rungs_bind_routes_immediately_before_captured_deploy() {
     for (rung, bundle) in [
         ("rung_local", "$WORKDIR/bundle"),
