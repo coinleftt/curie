@@ -45,7 +45,6 @@ SHARED_LIVE_STATE_FILES = frozenset(
         "apps/worker/tests/kernel/test_turn_not_started.py",
         "apps/worker/tests/kernel/test_upgrade_drain.py",
         "apps/worker/tests/test_thread_reset_vector.py",
-        "apps/api/tests/test_thread_reset_vector.py",
         "apps/api/tests/test_control_integration.py",
         "apps/api/tests/test_github_review_events.py",
         # GitHub review fixtures share fixed delivery identities, whose Valkey
