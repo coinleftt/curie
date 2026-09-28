@@ -4466,9 +4466,11 @@ case_local_otel_runner_failure() {
     inject_local_runner_failure
     failure_out="$("$BIN" --json local message --channel C0LOCALDEV "runner failure control" 2>&1)" || failure_code=$?
     printf '%s\n' "$failure_out"
-    if (( failure_code != 0 )) && [[ "$failure_out" != *'"finalized":true'* ]]; then
+    if (( failure_code != 0 )) && [[ "$failure_out" != *'"finalized":true'* ]] \
+        && [[ "$failure_out" != *'"failed":true'* ]]; then
         # An unexpectedly shaped failure cannot be allowed to strand the
-        # injected worker configuration.
+        # injected worker configuration. A failed runner turn exits 1 with
+        # failed:true (#3401); a finalized reply remains the older shape.
         restore_local_runner_health
         echo "local: injected runner failure produced neither a finalized escalation nor a queryable reply" >&2
         return 1

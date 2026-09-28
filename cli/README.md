@@ -108,8 +108,8 @@ state on stdout --
   (the model's reply, which is null on a no-edit completion, plus the thread
   the turn ran under);
 - a failed runner turn emits `{"reply": ..., "thread": ..., "finalized":
-  false, "failed": true, "failure_class": ...}` and exits 1. `reply` starts
-  with `curie-turn-failure: <failure_class>`;
+  false, "failed": true, "failure_class": ...}` and exits 1. When the worker
+  wrote the marker, `reply` starts with `curie-turn-failure: <failure_class>`;
 - a turn parked on a human approval gate emits `{"reply": ..., "thread":
   ..., "finalized": false, "awaiting_approval": true}` (the worker posted an
   approval card rather than finalizing, and `reply` is the card's placeholder

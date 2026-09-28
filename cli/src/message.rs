@@ -3819,6 +3819,7 @@ async fn run_eval_turns(
                 let completed = matches!(
                     outcome,
                     Outcome::Replied(_)
+                        | Outcome::Failed { .. }
                         | Outcome::AwaitingApproval { .. }
                         | Outcome::CompletedNoEdit
                 );
@@ -8196,6 +8197,19 @@ mod tests {
     fn turn_failure_reply_prefix_matches_the_frozen_vector() {
         let raw = include_str!("../../tests/vectors/turn-failure-reply.json");
         let vector: serde_json::Value = serde_json::from_str(raw).expect("vector json");
+        let allowed = [
+            "comment",
+            "reply_prefix",
+            "factory_class_line_prefix",
+            "examples",
+        ];
+        let object = vector.as_object().expect("vector object");
+        let unknown: Vec<_> = object
+            .keys()
+            .filter(|key| !allowed.contains(&key.as_str()))
+            .cloned()
+            .collect();
+        assert!(unknown.is_empty(), "unknown vector keys: {unknown:?}");
         let prefix = vector["reply_prefix"].as_str().expect("reply_prefix");
         assert_eq!(prefix, crate::chat::TURN_FAILURE_REPLY_PREFIX);
         for example in vector["examples"].as_array().expect("examples") {
