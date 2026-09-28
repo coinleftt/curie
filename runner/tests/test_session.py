@@ -1173,6 +1173,13 @@ class _OrderedTimeoutWireSession:
 
     async def receive_turn(self):
         if self.queries == 1:
+            if self.first_receive_entered.is_set() and any(
+                kind == "interrupt" for kind, _ in self.wire
+            ):
+                # The next turn's resync read of the abandoned first turn
+                # (#3425): the CLI ends a turn once it reads a written stop,
+                # whether or not the stop's ack reached the runner.
+                return
             self.first_receive_entered.set()
             await self.end_first_receive.wait()
             return

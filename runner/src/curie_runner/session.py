@@ -1145,8 +1145,10 @@ class SessionRunner:
                 async for message in self._session.receive_turn():
                     discarded += 1
                     if isinstance(message, ResultMessage):
-                        self._result_pending = False
                         break
+                # Reaching the result, or the iterator's own end, means the old
+                # turn's stream is exhausted; only the timeout leaves it pending.
+                self._result_pending = False
             except Exception as exc:  # noqa: BLE001 - a broken stream is reported, not raised
                 logger.warning(
                     "abandoned turn drain failed session=%s error_class=%s",
