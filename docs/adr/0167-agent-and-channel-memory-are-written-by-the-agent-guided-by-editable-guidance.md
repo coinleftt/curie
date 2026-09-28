@@ -125,8 +125,10 @@ model reads, not a list the platform matches against.
 - **Size** is bounded by the state store's existing limits. A save that would
   exceed them is refused and reported to the agent as refused. Keeping memory
   within them as it grows is what the packages above are for.
-- **The operator's `curie cluster memory` command** writes to agent or channel
-  memory from a file, and can list and delete facts.
+- **The operator's `curie cluster memory` command** keeps adding agent memory
+  with `--add`, and shows, sets and resets the guidance. Listing and deleting
+  individual facts, in agent or channel memory, is
+  [#3393](https://github.com/curie-eng/curie/issues/3393).
 
 ## Alternatives considered
 
