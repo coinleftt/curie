@@ -1167,6 +1167,7 @@
           "/v1/internal/work-items/requests/{request_id}/termination/claim",
           "/v1/internal/work-items/requests/{request_id}/termination",
           "/v1/work-item-progress/{request_id}",
+          "/v1/work-item-progress/{request_id}/verification",
           "/v1/factory/cards/{token}.svg",
           "/work-items",
           "/work-items/{work_item_id}",
@@ -1193,7 +1194,7 @@
           "5xx"
         ]
       },
-      "cardinality_bound": 4080
+      "cardinality_bound": 4120
     },
     "curie.http.server.request.duration": {
       "type": "histogram",
@@ -1303,6 +1304,7 @@
           "/v1/internal/work-items/requests/{request_id}/termination/claim",
           "/v1/internal/work-items/requests/{request_id}/termination",
           "/v1/work-item-progress/{request_id}",
+          "/v1/work-item-progress/{request_id}/verification",
           "/v1/factory/cards/{token}.svg",
           "/work-items",
           "/work-items/{work_item_id}",
@@ -1329,7 +1331,7 @@
           "5xx"
         ]
       },
-      "cardinality_bound": 4080
+      "cardinality_bound": 4120
     },
     "curie.http.server.active": {
       "type": "up_down_counter",
@@ -1439,6 +1441,7 @@
           "/v1/internal/work-items/requests/{request_id}/termination/claim",
           "/v1/internal/work-items/requests/{request_id}/termination",
           "/v1/work-item-progress/{request_id}",
+          "/v1/work-item-progress/{request_id}/verification",
           "/v1/factory/cards/{token}.svg",
           "/work-items",
           "/work-items/{work_item_id}",
@@ -1458,7 +1461,7 @@
           "OTHER"
         ]
       },
-      "cardinality_bound": 816
+      "cardinality_bound": 824
     },
     "curie.background.loop": {
       "type": "counter",
