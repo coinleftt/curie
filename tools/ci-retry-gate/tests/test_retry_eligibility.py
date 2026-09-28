@@ -50,8 +50,6 @@ RETRY_ALLOWLIST = frozenset(
         ("ci.yaml", "e2e-cluster-chart-regressions", "Create the kind cluster"),
         ("ci.yaml", "e2e-cluster-rollout-recovery", "Create the kind cluster"),
         ("ci.yaml", "e2e-cluster-upgrade-matrix", "Create the disposable kind cluster"),
-        ("xdist-characterise.yaml", "attempt", "Install uv"),
-        ("xdist-characterise.yaml", "aggregate", "Install uv"),
         ("dependency-audit.yaml", "python-audit", "Install uv"),
         ("gitleaks.yaml", "gitleaks", "Pull the gitleaks image"),
         ("release.yaml", "build", "Set up Buildx"),
@@ -201,12 +199,6 @@ RUN_RETRY_EXEMPT: frozenset[tuple[str, str, str]] = frozenset(
         # becomes ready the step fails the job rather than papering over it.
         ("ci.yaml", "ui-image-smoke", "Start the stub API upstream"),
         ("ci.yaml", "ui-image-smoke", "Start the UI container"),
-        # The characterisation harness boots the same dev stack as the
-        # python job and polls the same unhealthchecked Langfuse web
-        # container. A readiness poll for an external service, and this
-        # workflow gates nothing: it is an investigation that records
-        # which tests fail under parallelism.
-        ("xdist-characterise.yaml", "attempt", "Wait for Langfuse to serve"),
     }
 )
 
