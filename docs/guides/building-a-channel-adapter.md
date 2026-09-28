@@ -154,7 +154,7 @@ Responses:
 | 200 `{event_id, stream_id, duplicate}` | Accepted. `duplicate: false` means this request enqueued it. |
 | 202 `{event_id, stream_id: null, duplicate: true}` | Another request holds the claim and has not enqueued yet. Come back. |
 | 401 | Missing, malformed, expired, or stale-generation credential. One detail string for all of them, deliberately. |
-| 403 | The binding's caller list (ADR 0175) does not admit the turn's `author`. Final: settle the delivery without a turn, never retry it, and send nothing back to the sender. |
+| 403 `{"detail": "caller_not_allowed"}` | The binding's caller list (ADR 0175) does not admit the turn's `author`. Final: settle the delivery without a turn, never retry it, and send nothing back to the sender. A 403 with any other body is not this refusal; retry it. |
 | 404 | No agent bound to that `(kind, address)`. |
 | 409 | The binding has no reply route configured. |
 | 413 | Body over 256 KiB. The bound is enforced before parsing or authenticating. |
@@ -167,8 +167,11 @@ Responses:
 Do not treat “a response arrived” as final: 202 explicitly says another claim is
 not yet enqueued, and dropping that response loses the upstream message.
 
-**403 is final, for every adapter.** The platform checked the binding's caller list
-after your token and before claiming anything, and the author is not on it. Settle
+**A 403 with `{"detail": "caller_not_allowed"}` is final, for every adapter.** The
+platform checked the binding's caller list after your token and before claiming
+anything, and the author is not on it. Match the `detail` code exactly, not the
+status alone: a 403 from a proxy or firewall in front of the API carries no such
+code, is an infrastructure fault, and must stay retryable. Settle
 the delivery the way you settle mail your own sender filter rejected, and do not
 answer the sender: a polite refusal tells a stranger the bot exists. An adapter that
 retries every error will retry this one forever. Run your own sender checks first,

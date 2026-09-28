@@ -245,10 +245,13 @@ and names that verb as the fix. No platform signing key is given to the adapter.
   pending. A documented terminal 200, including a 200 duplicate receipt, settles
   it. Token rotation therefore restarts the single replica and resumes the
   original row rather than losing it.
-- **A 403 is final.** The channel port answers 403 when the binding's own caller
-  list does not admit the sender (ADR 0175). The adapter settles that message
-  without a turn, the same as one its own gate rejected, and never posts it
-  again; nothing is sent back to the sender.
+- **A caller-list refusal is final; any other 403 is not.** The channel port
+  answers 403 with `{"detail": "caller_not_allowed"}` when the binding's own
+  caller list does not admit the sender (ADR 0175). The adapter settles that
+  message without a turn, the same as one its own gate rejected, and never posts
+  it again; nothing is sent back to the sender. A 403 with any other body, such
+  as one from a proxy or firewall in front of the platform, leaves the delivery
+  pending and is retried like a 5xx.
 - **Provider failures are loud.** A TCP connection refusal while reading the
   provider thread witness or sending the reply returns 424 with
   `{"detail":"provider egress refused"}`. The worker stores that fixed cause on

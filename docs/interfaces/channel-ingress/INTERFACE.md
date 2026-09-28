@@ -115,8 +115,9 @@ satisfying the egress Protocol, or out of process over the HTTP wire.
   One function decides, `admit`
   (`apps/api/src/curie_api/admission.py::admit`), before any turn, placeholder or
   reply. The wire ingress runs it inside `POST /channels/turns` after verifying the
-  token and before claiming the delivery, and answers a refused `author` with 403,
-  which every adapter treats as final. The Slack dispatcher has no database, so it
+  token and before claiming the delivery, and answers a refused `author` with 403
+  and `{"detail": "caller_not_allowed"}`, which every adapter treats as final (a
+  403 without that code stays retryable). The Slack dispatcher has no database, so it
   asks `POST /channels/admission` (platform key only) through `AdmissionGate`
   (`apps/dispatcher/src/curie_dispatcher/admission.py::AdmissionGate`) after its
   own filters and before `claim_event`, on mentions, direct messages and

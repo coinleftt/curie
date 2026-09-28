@@ -8,7 +8,9 @@ unbounded set and the pod is OOMKilled by anyone who can mail a public inbox.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
+from pathlib import Path
 
 import curie_mail_adapter.adapter as adapter_module
 import pytest
@@ -26,6 +28,18 @@ from _support import (
     wait_until,
 )
 from curie_mail_adapter.adapter import MailAdapter
+
+REFUSAL_VECTOR = (
+    Path(__file__).resolve().parents[3] / "tests" / "vectors" / "channel-port-refusal.json"
+)
+
+
+def _refusal() -> tuple[int, dict[str, str]]:
+    """The platform's caller-list refusal, read from the frozen vector the API
+    side is pinned to as well, so the two cannot drift apart."""
+    vector = json.loads(REFUSAL_VECTOR.read_text())
+    assert set(vector) == {"comment", "status", "detail"}, "unknown key in the frozen vector"
+    return int(vector["status"]), {"detail": str(vector["detail"])}
 
 
 def test_inbound_posts_to_the_platform_ingress(
@@ -407,13 +421,14 @@ def test_a_403_from_the_channel_port_is_final_and_settles_without_a_turn(
     adapter: MailAdapter,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """ADR 0175: the platform answers 403 when the binding's caller list does
-    not admit the sender. That is final for every adapter, so the delivery is
+    """ADR 0175: the platform answers 403 with the `caller_not_allowed` code
+    when the binding's caller list does not admit the sender. That is final for
+    every adapter, so the delivery is
     settled without a turn and never posted again, unlike the retryable 401,
     429 and 5xx above. The adapter's own sender gate still ran first: the
     sender here passed CURIE_MAIL_ALLOWED_SENDERS and was refused upstream."""
 
-    ingress.response = (403, {"detail": "this binding does not admit the turn's author"})
+    ingress.response = _refusal()
     mail.add_inbound("msg-1", "thr-1", text="the numbers you asked for")
 
     with caplog.at_level("WARNING", logger="curie_mail_adapter.adapter"):
@@ -443,7 +458,7 @@ def test_a_403_after_a_retryable_answer_still_settles_the_same_delivery(
 
     ingress.responses = [
         (500, {"detail": "retry"}, {}),
-        (403, {"detail": "this binding does not admit the turn's author"}, {}),
+        (*_refusal(), {}),
     ]
     mail.add_inbound("msg-1", "thr-1")
 
@@ -454,3 +469,39 @@ def test_a_403_after_a_retryable_answer_still_settles_the_same_delivery(
 
     assert ingress.delivery_ids() == ["msg-1", "msg-1"]
     assert adapter.state.delivery("msg-1") == {"state": "rejected", "turn": None}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        (403, "<html><body>403 Forbidden</body></html>"),
+        (403, {"detail": "Forbidden"}),
+        (403, {"detail": "caller_not_allowed_by_proxy"}),
+        (403, {"detail": {"code": "caller_not_allowed"}}),
+        (403, {}),
+    ],
+    ids=["proxy-html", "other-detail", "near-miss-code", "nested-code", "no-detail"],
+)
+def test_a_403_without_the_refusal_code_stays_retryable(
+    mail: MailState,
+    ingress: IngressState,
+    adapter: MailAdapter,
+    response: tuple[int, dict[str, str] | str],
+) -> None:
+    """A 403 from a proxy, firewall or any other check in front of the channel
+    port is an infrastructure fault, not a refused sender: settling it would
+    drop real mail for good. Only the exact code from the frozen vector settles;
+    anything else leaves the same delivery pending and retries it."""
+
+    ingress.responses = [
+        (response[0], response[1], {}),
+        (200, {"event_id": "chn-1", "stream_id": "1-0", "duplicate": False}, {}),
+    ]
+    mail.add_inbound("msg-1", "thr-1")
+
+    adapter.poll_once()
+    assert adapter.state.delivery("msg-1")["state"] == "ingress_pending"  # type: ignore[index]
+    adapter.poll_once()
+
+    assert ingress.delivery_ids()[-1] == "msg-1"
+    assert adapter.state.delivery("msg-1")["state"] == "accepted"  # type: ignore[index]
