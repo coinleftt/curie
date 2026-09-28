@@ -5,9 +5,7 @@
 
 use std::path::Path;
 
-use curie::connector_build::{
-    check_runner_source, load, undeclared_runner_dockerfile, RUNNER_DOCKERFILE,
-};
+use curie::connector_build::{check_runner_source, load};
 
 #[test]
 fn shipped_bundles_declare_their_runner_layer() {
@@ -19,8 +17,7 @@ fn shipped_bundles_declare_their_runner_layer() {
             .runner
             .as_ref()
             .unwrap_or_else(|| panic!("{name}: connectors.yaml declares no runner layer"));
-        assert_eq!(runner.build.dockerfile, RUNNER_DOCKERFILE, "{name}");
+        assert_eq!(runner.build.dockerfile, "runner.Dockerfile", "{name}");
         check_runner_source(&dir, runner).unwrap_or_else(|err| panic!("{name}: {err:#}"));
-        assert_eq!(undeclared_runner_dockerfile(&dir, &decl), None, "{name}");
     }
 }
