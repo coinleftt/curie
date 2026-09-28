@@ -421,9 +421,16 @@ jobs:
             exit 0
           fi
           git fetch --quiet origin "$BASE_REF"
-          patterns="$(grep -vE '^[[:space:]]*(#|$)' .github/rust-test-paths.txt)"
-          matched="$(git diff --name-only "origin/$BASE_REF...HEAD" \
-            | grep -E -f <(printf '%s\n' "$patterns") || true)"
+          grep -vE '^[[:space:]]*(#|$)' .github/rust-test-paths.txt > "$RUNNER_TEMP/patterns"
+          git diff --name-only "origin/$BASE_REF...HEAD" > "$RUNNER_TEMP/changed"
+          # grep exits 1 for "no match" and 2 for a broken pattern; only the
+          # first may skip the tests, so a bad regex fails this job closed.
+          status=0
+          matched="$(grep -E -f "$RUNNER_TEMP/patterns" "$RUNNER_TEMP/changed")" || status=$?
+          if [ "$status" -gt 1 ]; then
+            echo "grep failed (exit $status) matching .github/rust-test-paths.txt" >&2
+            exit 1
+          fi
           if [ -n "$matched" ]; then
             printf 'Rust-relevant changes:\n%s\n' "$matched"
             echo "tests=true" >> "$GITHUB_OUTPUT"
