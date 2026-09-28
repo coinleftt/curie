@@ -60,8 +60,13 @@ env:
   KUBECONFORM_VERSION: v0.6.7
 
 jobs:
-  helm:
-    name: Chart (lint + template + kubeconform)
+  # The chart gate runs as parallel shards. The render assertions used to be
+  # one serial job of roughly nine minutes, dominated by the retained-values
+  # step that builds the CLI; each shard now repeats the cheap tool setup and
+  # runs its slice, and the required check below reports only after every
+  # shard succeeded.
+  chart-lint-and-assertions-1:
+    name: Chart lint, kubeconform, and render assertions (1 of 3)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -116,6 +121,28 @@ jobs:
           helm template "$CHART" \
             | python3 -c "import sys, yaml; yaml.safe_dump_all(yaml.safe_load_all(sys.stdin), sys.stdout)" \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version "$KUBE_VERSION"
+
+      - name: helm template + kubeconform (values-dev overlay)
+        run: |
+          set -euo pipefail
+          helm template "$CHART" -f "$CHART/values-dev.yaml" \
+            | python3 -c "import sys, yaml; yaml.safe_dump_all(yaml.safe_load_all(sys.stdin), sys.stdout)" \
+            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version "$KUBE_VERSION"
+
+      - name: helm template + kubeconform (e2e nogvisor overlay)
+        run: |
+          set -euo pipefail
+          helm template "$CHART" -f "$CHART/values-dev.yaml" -f "$CHART/values-e2e-nogvisor.yaml" \
+            | python3 -c "import sys, yaml; yaml.safe_dump_all(yaml.safe_load_all(sys.stdin), sys.stdout)" \
+            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version "$KUBE_VERSION"
+
+      - name: helm template + kubeconform (external stateful services overlay)
+        run: |
+          set -euo pipefail
+          helm template "$CHART" -f "$CHART/values-external.yaml" \
+            | python3 -c "import sys, yaml; yaml.safe_dump_all(yaml.safe_load_all(sys.stdin), sys.stdout)" \
+            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version "$KUBE_VERSION"
+
 
       # Prove the credential Secret generates strong per-release values on the
       # sealed path (issue #195) while the dev overlay keeps its deterministic
@@ -347,6 +374,30 @@ jobs:
           set -euo pipefail
           bash charts/curie/ci/langfuse-recreate-assertions.sh
 
+  chart-assertions-2:
+    name: Chart render assertions (2 of 3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5.0.1
+        with:
+          version: v3.16.4
+
+      - name: Install kubeconform
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+          # The validate steps normalize rendered manifests through PyYAML (see
+          # below). It ships on ubuntu-latest, but ensure it explicitly so this
+          # job is not coupled to the runner image.
+          python3 -c "import yaml" 2>/dev/null || pip install --quiet pyyaml
+
       # Prove Langfuse startup is gated on ClickHouse being up (issue #2009). A
       # Helm upgrade that recreates the ClickHouse Service otherwise lets the new
       # Langfuse pods start their migrations against an unresolvable name, so the
@@ -488,20 +539,6 @@ jobs:
         run: |
           set -euo pipefail
           bash charts/curie/ci/upgrade-drain-assertions.sh
-
-      # Retained values must reach Helm with their scalar TYPES intact (#2741).
-      # The CLI re-serialized the values it reads back from a release, and its
-      # YAML 1.2 emitter left `off`, `on`, `yes` and `no` unquoted -- words that
-      # Helm's YAML 1.1 parser resolves as booleans. A release holding
-      # `security.gvisor.mode: "off"` upgraded into `false` and then demanded a
-      # RuntimeClass the cluster did not have. This step drives the real CLI,
-      # captures the document it hands Helm, and reads it back with real Helm,
-      # so the round trip is asserted through the consumer that actually broke.
-      # It builds the CLI, which is why it is the one step here that needs cargo.
-      - name: helm render assertions (retained values scalar preservation)
-        run: |
-          set -euo pipefail
-          bash charts/curie/ci/upgrade-retained-scalar-assertions.sh
 
       # Schema migrations run in one hook Job (#2300). Prove the Job is the
       # migrator, the API init only waits, and forward-only is opt-in.
@@ -796,26 +833,60 @@ jobs:
           set -euo pipefail
           bash charts/curie/ci/release-record-size-assertions.sh
 
-      - name: helm template + kubeconform (values-dev overlay)
-        run: |
-          set -euo pipefail
-          helm template "$CHART" -f "$CHART/values-dev.yaml" \
-            | python3 -c "import sys, yaml; yaml.safe_dump_all(yaml.safe_load_all(sys.stdin), sys.stdout)" \
-            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version "$KUBE_VERSION"
+  chart-assertions-retained-values:
+    name: Chart render assertions (3 of 3, retained values through the real CLI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-      - name: helm template + kubeconform (e2e nogvisor overlay)
-        run: |
-          set -euo pipefail
-          helm template "$CHART" -f "$CHART/values-dev.yaml" -f "$CHART/values-e2e-nogvisor.yaml" \
-            | python3 -c "import sys, yaml; yaml.safe_dump_all(yaml.safe_load_all(sys.stdin), sys.stdout)" \
-            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version "$KUBE_VERSION"
+      - name: Install Helm
+        uses: azure/setup-helm@v5.0.1
+        with:
+          version: v3.16.4
 
-      - name: helm template + kubeconform (external stateful services overlay)
+      - name: Install kubeconform
         run: |
           set -euo pipefail
-          helm template "$CHART" -f "$CHART/values-external.yaml" \
-            | python3 -c "import sys, yaml; yaml.safe_dump_all(yaml.safe_load_all(sys.stdin), sys.stdout)" \
-            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version "$KUBE_VERSION"
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+          # The validate steps normalize rendered manifests through PyYAML (see
+          # below). It ships on ubuntu-latest, but ensure it explicitly so this
+          # job is not coupled to the runner image.
+          python3 -c "import yaml" 2>/dev/null || pip install --quiet pyyaml
+
+      # Retained values must reach Helm with their scalar TYPES intact (#2741).
+      # The CLI re-serialized the values it reads back from a release, and its
+      # YAML 1.2 emitter left `off`, `on`, `yes` and `no` unquoted -- words that
+      # Helm's YAML 1.1 parser resolves as booleans. A release holding
+      # `security.gvisor.mode: "off"` upgraded into `false` and then demanded a
+      # RuntimeClass the cluster did not have. This step drives the real CLI,
+      # captures the document it hands Helm, and reads it back with real Helm,
+      # so the round trip is asserted through the consumer that actually broke.
+      # It builds the CLI, which is why it is the one step here that needs cargo.
+      - name: helm render assertions (retained values scalar preservation)
+        run: |
+          set -euo pipefail
+          bash charts/curie/ci/upgrade-retained-scalar-assertions.sh
+
+  # The required check name the release gate reads (release/authorize.py).
+  # It carries no job-level `if:` (#1470): when any shard fails this job is
+  # skipped, and the release gate refuses a skipped required check, so a
+  # failing shard still blocks a release exactly as a failing step did when
+  # the shards were one job.
+  helm:
+    name: Chart (lint + template + kubeconform)
+    runs-on: ubuntu-latest
+    needs: [chart-lint-and-assertions-1, chart-assertions-2, chart-assertions-retained-values]
+    steps:
+      - name: Every chart shard passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS" | jq -e '[.[].result] | all(. == "success")'
 
   reserved-env-upgrade:
     name: Reject legacy extraEnv before upgrade mutation

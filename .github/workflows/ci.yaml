@@ -350,7 +350,12 @@ jobs:
     name: CLI runs on old glibc (and publishes per-commit binaries)
     runs-on: ubuntu-latest
     needs: [changes]
-    if: ${{ needs.changes.outputs.cli_release == 'true' }}
+    # Off the pull request path: in 14 days of PR runs this job caught no
+    # failures while adding five minutes of runner time to every CLI PR. It runs
+    # on every push to main and next (so every releasable commit is proven, and
+    # the per-commit portable binaries below still publish for both branches)
+    # and on the nightly workflow_dispatch of the full suite.
+    if: ${{ github.event_name != 'pull_request' && needs.changes.outputs.cli_release == 'true' }}
     # The release cross-compile path was never exercised before a tag, so a
     # regression in it was undiscoverable until someone tried the artifact on a
     # real host. #1341 shipped exactly that way: both Linux targets inherited
@@ -433,7 +438,9 @@ jobs:
     name: CLI builds for macOS (the fourth release target)
     runs-on: macos-latest
     needs: [changes]
-    if: ${{ needs.changes.outputs.cli_release == 'true' }}
+    # Same trigger as `cli-portability`: push to main and next plus the nightly
+    # dispatch, never a pull request.
+    if: ${{ github.event_name != 'pull_request' && needs.changes.outputs.cli_release == 'true' }}
     # `aarch64-apple-darwin` ships in the release matrix (release.yaml) and was
     # compiled for the FIRST TIME when a tag was pushed. Anything that breaks it
     # -- a dependency that does not build on macOS, a `cfg(unix)` assumption that

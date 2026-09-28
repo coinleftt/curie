@@ -1337,7 +1337,10 @@ class TestReleaseWorkflowContract:
 
     def test_observability_stack_assertions_run_in_helm_ci(self):
         workflow = yaml.load(HELM_CI_YAML.read_text(), Loader=yaml.BaseLoader)
-        chart_steps = workflow["jobs"]["helm"]["steps"]
+        # The chart assertions run as parallel shards, so search every job.
+        chart_steps = [
+            step for job in workflow["jobs"].values() for step in job.get("steps", [])
+        ]
         matching = [
             step
             for step in chart_steps
