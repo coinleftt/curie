@@ -1808,6 +1808,7 @@ def _selector_outputs_omit_kind(tmp_path: Path, path: str) -> dict[str, str]:
 
 CLUSTER_RUNG_MOVED_PROOFS = {
     "Langfuse web waits for delayed Postgres without restarting": "e2e-cluster-chart-regressions",
+    "Connector that never listens stays not-Ready until it binds": "e2e-cluster-chart-regressions",
     "Runner BYO egress enforces (not just rendered)": "e2e-cluster-chart-regressions",
     "Rollout-free first invocation and dead-consumer recovery": "e2e-cluster-rollout-recovery",
 }
