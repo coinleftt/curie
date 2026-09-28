@@ -6950,18 +6950,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_timed_out_probe_kills_the_docker_child_it_abandoned() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir().expect("create temporary directory");
         let pidfile = temp.path().join("pid");
         let script = temp.path().join("wedged-docker");
-        std::fs::write(&script, "#!/bin/sh\necho $$ > \"$1\"\nexec sleep 60\n")
-            .expect("write wedged docker shim");
-        let mut permissions = std::fs::metadata(&script)
-            .expect("shim metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script, permissions).expect("make shim executable");
+        crate::test_executable::install(&script, "#!/bin/sh\necho $$ > \"$1\"\nexec sleep 60\n");
 
         let cmd = OpsCommand::new(
             script.to_str().expect("shim path is UTF 8"),

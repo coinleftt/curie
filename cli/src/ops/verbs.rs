@@ -2425,18 +2425,8 @@ mod api_key_discovery_tests {
         }
     }
 
-    fn write_executable(path: &std::path::Path, body: &str) {
-        std::fs::write(path, body).expect("write fake cluster executable");
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(path)
-            .expect("read fake cluster executable metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).expect("make fake cluster executable runnable");
-    }
-
     fn install_cluster_diagnosis_tools(tools: &std::path::Path) -> EnvRestore {
-        write_executable(
+        crate::test_executable::install(
             &tools.join("kubectl"),
             r#"#!/bin/sh
 case "$*" in
@@ -2454,7 +2444,7 @@ case "$*" in
 esac
 "#,
         );
-        write_executable(
+        crate::test_executable::install(
             &tools.join("helm"),
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "$CURIE_TEST_HELM_LOG"
