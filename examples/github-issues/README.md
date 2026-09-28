@@ -56,23 +56,28 @@ Prerequisites: a model credential in your environment
 (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`), and a GitHub PAT. A
 read-scoped (`public_repo` / `repo:read`) token is enough to list and read
 issues. `mcp-server-github` is installed by this bundle's runner layer, not by
-the platform runner. `curie skill up` still starts the
-platform image, which does not contain that binary.
+the platform runner. `curie skill check` and `curie skill up` start the platform
+image unless you pass the layer with `--image`, so build it into your local
+Docker daemon first (no `--registry`) and pass the image its lock records.
 
 ```bash
 export GITHUB_PERSONAL_ACCESS_TOKEN=ghp_your_token_here
 
 cd examples/github-issues
 
+# Build the runner layer locally; connectors.lock.yaml records its image id.
+curie build --plugin-dir .
+LAYER=$(awk '/^runner:/{r=1} r && /^  image:/{print $2; exit}' connectors.lock.yaml)
+
 # Optional: confirm the server binary is present and loads in an offline check.
 # It runs --network none and forwards no secret, so for an authed server the
 # check prints an explicit `authed server ... not exercised offline` advisory:
 # a green proves only the wiring, not the token, and a red may mean just a
 # missing credential -- `skill up` below is the real end-to-end test.
-curie skill check
+curie skill check --image "$LAYER"
 
 # Boot the runner with the model credential AND the GitHub token forwarded.
-curie skill up --secret GITHUB_PERSONAL_ACCESS_TOKEN
+curie skill up --image "$LAYER" --secret GITHUB_PERSONAL_ACCESS_TOKEN
 
 # Ask it something that exercises the authed server.
 curie skill message "List the open issues in curie-eng/curie and group them by label."
