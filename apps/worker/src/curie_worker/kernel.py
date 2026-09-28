@@ -1768,6 +1768,19 @@ class Kernel:
             )
 
     async def notify_capacity_queued(self, qevent: QueuedTurn) -> ReplyAck:
+        # A queued edit that starts after the answer must not replace it. An
+        # edit already inside the sink is a different window: the notice lock
+        # holds the wake until that send finishes. An unreadable terminality
+        # check raises so the notice loop reschedules instead of recording the
+        # notice as delivered.
+        if qevent.event_id in self._terminal_reply_attempted:
+            return ReplyAck()
+        try:
+            terminal = await self._markers.is_terminal(qevent.event_id)
+        except asyncio.CancelledError:
+            raise
+        if terminal:
+            return ReplyAck()
         try:
             return await self._reply_for(
                 qevent,
@@ -5446,25 +5459,36 @@ class Kernel:
             # A capacity wake may meet a different live turn on this thread.
             # Keep its original deadline and retry after that turn finishes;
             # steering would inject the message before its admission grant.
-            wait_budget_s = await check_capacity_before_request()
-            try:
-                capacity_status = await self._runner.capacity_status(
-                    handle.base_url, token=handle.token or None,
-                    remaining_s=min(1.0, wait_budget_s or 1.0),
-                )
-            except Exception:
-                logger.warning(
-                    "capacity runner status unavailable for event %s",
-                    wait[1], exc_info=True,
-                )
-                raise CapacityWaitRequested() from None
-            # An older runner does not implement the admission gate. Never
-            # submit a capacity event to a runner that would start it directly.
-            if (
-                capacity_status.get("capacity_admission") is not True
-                or capacity_status.get("turn_active") is not False
-            ):
-                raise CapacityWaitRequested()
+            # A grant that already started is not that case. Re-parking it
+            # edits the thread back to "queued" after the turn was admitted,
+            # which is what a replacement sees when the previous owner's
+            # runner is still marked busy or its status read blips.
+            wait_record = await wait[0].get(wait[1])
+            already_granted = (
+                wait_record is not None
+                and wait_record.state == "active"
+                and wait_record.grant_confirmed
+            )
+            if not already_granted:
+                wait_budget_s = await check_capacity_before_request()
+                try:
+                    capacity_status = await self._runner.capacity_status(
+                        handle.base_url, token=handle.token or None,
+                        remaining_s=min(1.0, wait_budget_s or 1.0),
+                    )
+                except Exception:
+                    logger.warning(
+                        "capacity runner status unavailable for event %s",
+                        wait[1], exc_info=True,
+                    )
+                    raise CapacityWaitRequested() from None
+                # An older runner does not implement the admission gate. Never
+                # submit a capacity event to a runner that would start it directly.
+                if (
+                    capacity_status.get("capacity_admission") is not True
+                    or capacity_status.get("turn_active") is not False
+                ):
+                    raise CapacityWaitRequested()
         elif source.is_job or verified_review is not None:
             # ADR-0079: a job is an OUTPUT, not a steering input. A cron digest or
             # a webhook must never fold itself into whatever a person is currently

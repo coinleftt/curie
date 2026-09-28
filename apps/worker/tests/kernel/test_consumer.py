@@ -1318,8 +1318,22 @@ def test_active_wait_delivery_recovers_after_deadline_without_expiry(make_harnes
                 [wake_id],
             )
             assert reclaimed == [(wake_id, wake_fields)]
+            # The cancelled owner can still look busy to the runner status
+            # read. That must not park the admitted turn again and edit the
+            # thread back to the queued notice.
+            h.runner.turn_active = True
             await recovery._sem.acquire()
             await recovery._handle(wake_id, wake_fields)
+            assert h.sink.last_text == "recovered answer"
+            assert [text for _, _, text in h.sink.updates].count(
+                "The agent is busy. Your request is queued and will start when space opens."
+            ) == 1
+            # A queued edit that loses the race with this answer must not
+            # replace it. The notice path is the same one the first consumer
+            # used; after the answer it has to no-op.
+            before = list(h.sink.updates)
+            await h.kernel.notify_capacity_queued(event)
+            assert h.sink.updates == before
             assert h.sink.last_text == "recovered answer"
             done = await _wait_capacity_state(recovery, event.event_id, "done")
             assert done.cause == ""
