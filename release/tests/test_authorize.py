@@ -17,7 +17,7 @@ import posixpath
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
@@ -1304,39 +1304,47 @@ class TestHelmCiWorkflowTriggers:
         assert "paths" not in triggers["push"]
         assert "paths-ignore" not in triggers["push"]
         assert triggers["pull_request"]["branches"] == ["main", "next"]
-        # The Python paths are not strays to tidy up: the object-store
-        # web-identity gate executes those repository files against each
-        # rendered workload, so a PR touching only them (a revert of the
-        # credential fix) must still match this filter or the gate never runs.
-        # compose.dev.yaml is here for the same reason: two chart gates (the
-        # unpinned-image gate, #2319, and the Langfuse image-pin gate, #2190)
-        # read it, so a compose-only unpin must still trigger this workflow.
-        # apps/dispatcher/src/curie_dispatcher/config.py is here for the same
-        # reason again: the threaded-bot-allowlist chart gate (#2437) feeds
-        # the rendered env value through the real ThreadedBotAdmission
-        # parser, so a PR that only relaxes that parser must still run this
-        # workflow.
-        # The two cli/ paths are the same obligation once more (#2741): the
-        # retained-values scalar gate builds and runs the real CLI against the
-        # recorded upgrade boundary, so its subject and its stub driver both
-        # live outside charts/, and a PR restoring the YAML 1.2 emitter must
-        # still match this filter.
+        # The non-chart trees are not strays to tidy up: helm-ci's Chart job
+        # is the only CI run of charts/curie/ci/, and those scripts read or
+        # execute code in each of these trees (the api, worker, and
+        # dispatcher config through `uv run`, the CLI through cargo, the
+        # aci-protocol bindings, scripts/, the compose files, the ci.yaml and
+        # release.yaml image matrices). A PR touching
+        # only one of them must still match this filter or the gate that
+        # exists to catch it never runs.
         assert triggers["pull_request"]["paths"] == [
             "charts/curie/**",
-            "examples/sre-bot/observability/**",
+            "examples/sre-bot/**",
             ".github/workflows/helm-ci.yaml",
-            "packages/aci-protocol/src/aci_protocol/s3.py",
-            "apps/api/src/curie_api/config.py",
-            "apps/api/src/curie_api/storage.py",
-            "apps/worker/src/curie_worker/config.py",
-            "apps/worker/src/curie_worker/bundle_store.py",
-            "apps/dispatcher/src/curie_dispatcher/config.py",
+            ".github/workflows/ci.yaml",
+            ".github/workflows/release.yaml",
+            "cli/**",
+            "apps/api/**",
+            "apps/worker/**",
+            "apps/dispatcher/**",
+            "packages/**",
+            "scripts/**",
             "uv.lock",
             "pyproject.toml",
+            "compose.yaml",
             "compose.dev.yaml",
-            "cli/src/ops/upgrade.rs",
-            "cli/tests/data/upgrade-driver.py",
+            "compose/**",
         ]
+
+    def test_a_cli_only_change_runs_the_chart_scripts(self):
+        # The Rust job no longer runs the chart scripts, so a CLI-only PR
+        # that breaks upgrade-retained-scalar or observability-stack is
+        # caught only if helm-ci's filter matches it.
+        paths = yaml.safe_load(HELM_CI_YAML.read_text())[True]["pull_request"]["paths"]
+        for changed in (
+            "cli/src/ops/upgrade.rs",
+            "cli/src/examples.rs",
+            "cli/scripts/e2e-ladder.sh",
+            "cli/Cargo.lock",
+        ):
+            assert any(
+                PurePosixPath(changed).full_match(pattern) for pattern in paths
+            ), f"{changed} matches no helm-ci pull_request path"
 
 
 class TestMixedPassFailRequiredCheck:
