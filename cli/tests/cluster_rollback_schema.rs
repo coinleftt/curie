@@ -27,96 +27,104 @@ fn catalog_marks_artifact_identity_ambiguous(version: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Release v0.8.7 carries the same Alembic head as v0.8.6. Pin both the
-/// accepted live head and the fail-closed boundary for an unknown successor.
+/// Keep each release's catalog window and accepted boundaries in one table.
 #[test]
-fn v087_accepts_0039_and_refuses_an_unknown_newer_revision() {
-    let window = window_for("0.8.7").expect("0.8.7 is catalogued");
-    assert_eq!(window.schema_min, "0001");
-    assert_eq!(window.schema_head, "0039");
-    assert!(live_in_window("0039", &window));
-    assert!(!live_in_window("0040", &window));
-}
-
-/// Published v0.8.8 carries Alembic head 0039. Historical next candidates used
-/// the same application version, so the catalog must require artifact identity.
-#[test]
-fn v088_published_window_ends_at_0039_and_requires_artifact_identity() {
-    let window = window_for("0.8.8").expect("0.8.8 is catalogued");
-    assert_eq!(window.schema_min, "0001");
-    assert_eq!(window.schema_head, "0039");
-    assert!(live_in_window("0039", &window));
-    assert!(!live_in_window("0044", &window));
-    assert!(catalog_marks_artifact_identity_ambiguous("0.8.8"));
-}
-
-/// Published v0.8.9 also stops at 0039. A historical candidate can extend that
-/// window only when its retained manifest establishes the different artifact.
-#[test]
-fn v089_published_window_ends_at_0039_and_requires_artifact_identity() {
-    let window = window_for("0.8.9").expect("0.8.9 is catalogued");
-    assert_eq!(window.schema_min, "0001");
-    assert_eq!(window.schema_head, "0039");
-    assert!(live_in_window("0039", &window));
-    assert!(!live_in_window("0044", &window));
-    assert!(catalog_marks_artifact_identity_ambiguous("0.8.9"));
-}
-
-/// The released 0.9.0 and 0.9.1 artifacts stop at Alembic head 0044. Pin the
-/// accepted live head and the boundary before the later 0.9.2 migration.
-#[test]
-fn v090_and_v091_accept_0044_and_refuse_0045() {
-    for version in ["0.9.0", "0.9.1"] {
-        let window = window_for(version).unwrap_or_else(|| panic!("{version} is catalogued"));
-        assert_eq!(window.schema_min, "0001", "{version}");
-        assert_eq!(window.schema_head, "0044", "{version}");
-        assert!(live_in_window("0044", &window), "{version}");
-        assert!(live_in_window("0039", &window), "{version}");
-        assert!(!live_in_window("0045", &window), "{version}");
-        assert!(
-            !catalog_marks_artifact_identity_ambiguous(version),
-            "{version} has one unambiguous released artifact identity"
-        );
-    }
-}
-
-/// Released v0.9.2 is a single revision window at 0045. The feature train
-/// chart continues past that window, so this pin is the catalog, not the
-/// packaged 0.10.0 graph.
-#[test]
-fn v092_accepts_0045_and_refuses_outside_its_single_revision_window() {
-    let window = window_for("0.9.2").expect("0.9.2 is catalogued");
-    assert_eq!(window.schema_min, "0045");
-    assert_eq!(window.schema_head, "0045");
-    assert!(!live_in_window("0044", &window));
-    assert!(live_in_window("0045", &window));
-    assert!(!live_in_window("0046", &window));
-    assert!(
-        !catalog_marks_artifact_identity_ambiguous("0.9.2"),
-        "0.9.2 has one unambiguous released artifact identity"
-    );
-}
-
-#[test]
-fn v0100_release_candidates_have_exact_catalog_windows() {
+fn release_catalog_windows_match_their_revision_boundaries() {
     let catalog: serde_json::Value =
         serde_json::from_str(include_str!("../src/application_schema_windows.json"))
             .expect("application schema catalog parses");
-    for version in ["0.10.0-rc.1", "0.10.0-rc.2"] {
-        assert!(catalog["windows"].get(version).is_some());
-        let window = window_for(version).expect("release candidate is catalogued");
-        assert_eq!(window.schema_min, "0045");
-        assert_eq!(window.schema_head, "0057");
-        assert!(live_in_window("0045", &window));
-        assert!(live_in_window("0056", &window));
-        assert!(live_in_window("0057", &window));
-        assert!(!live_in_window("0044", &window));
+
+    type ReleaseCase<'a> = (
+        &'a str,
+        &'a str,
+        &'a str,
+        &'a [&'a str],
+        &'a [&'a str],
+        bool,
+        bool,
+    );
+    let cases: &[ReleaseCase<'_>] = &[
+        ("0.8.7", "0001", "0039", &["0039"], &["0040"], false, false),
+        ("0.8.8", "0001", "0039", &["0039"], &["0044"], true, false),
+        ("0.8.9", "0001", "0039", &["0039"], &["0044"], true, false),
+        (
+            "0.9.0",
+            "0001",
+            "0044",
+            &["0039", "0044"],
+            &["0045"],
+            false,
+            false,
+        ),
+        (
+            "0.9.1",
+            "0001",
+            "0044",
+            &["0039", "0044"],
+            &["0045"],
+            false,
+            false,
+        ),
+        (
+            "0.9.2",
+            "0045",
+            "0045",
+            &["0045"],
+            &["0044", "0046"],
+            false,
+            false,
+        ),
+        (
+            "0.10.0-rc.1",
+            "0045",
+            "0057",
+            &["0045", "0056", "0057"],
+            &["0044"],
+            false,
+            true,
+        ),
+        (
+            "0.10.0-rc.2",
+            "0045",
+            "0057",
+            &["0045", "0056", "0057"],
+            &["0044"],
+            false,
+            true,
+        ),
+    ];
+
+    for (version, schema_min, schema_head, accepted, refused, ambiguous, prefixed_alias) in cases {
+        let window = window_for(version).unwrap_or_else(|| panic!("{version} is catalogued"));
+        assert_eq!(window.schema_min, *schema_min, "{version}");
+        assert_eq!(window.schema_head, *schema_head, "{version}");
+        for revision in *accepted {
+            assert!(
+                live_in_window(revision, &window),
+                "{version} accepts {revision}"
+            );
+        }
+        for revision in *refused {
+            assert!(
+                !live_in_window(revision, &window),
+                "{version} refuses {revision}"
+            );
+        }
         assert_eq!(
-            window_for(&format!("v{version}"))
-                .expect("prefixed release candidate is catalogued")
-                .schema_head,
-            window.schema_head
+            catalog_marks_artifact_identity_ambiguous(version),
+            *ambiguous,
+            "{version} artifact identity ambiguity"
         );
+        if *prefixed_alias {
+            assert!(catalog["windows"].get(*version).is_some());
+            assert_eq!(
+                window_for(&format!("v{version}"))
+                    .expect("prefixed release candidate is catalogued")
+                    .schema_head,
+                window.schema_head,
+                "{version} prefixed alias"
+            );
+        }
     }
 }
 
