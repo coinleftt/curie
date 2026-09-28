@@ -376,6 +376,8 @@ ready_endpoint_count() {
   local json
   # A failed read is not zero ready addresses. Treating it as 0 would let the
   # never-listens and pre-bind legs pass without seeing the Endpoints object.
+  # Callers must be plain assignments. A failed read inside if, &&, or local
+  # would be ignored, and set -e would not stop the script.
   if ! json="$(kc get endpoints "$SERVICE" -n "$NAMESPACE" -o json)"; then
     fail "could not read Endpoints $SERVICE"
   fi
