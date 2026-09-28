@@ -658,6 +658,20 @@ async def delete_channel_binding(session: AsyncSession, binding: AgentChannel) -
     await session.flush()
 
 
+async def any_binding_restricted(session: AsyncSession) -> bool:
+    """Whether any binding on this install carries a caller list (ADR 0175).
+
+    The install-wide half of the admission answer. One `EXISTS` over a
+    nullable column: a binding table holds a handful of rows per agent, so the
+    scan costs less than the round trip that carries it.
+    """
+
+    found = await session.scalar(
+        select(AgentChannel.id).where(AgentChannel.allowed_callers.is_not(None)).limit(1)
+    )
+    return found is not None
+
+
 async def set_allowed_callers(
     session: AsyncSession, binding: AgentChannel, allowed_callers: list[str] | None
 ) -> AgentChannel:

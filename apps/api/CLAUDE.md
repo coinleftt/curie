@@ -51,7 +51,8 @@ worker, Postgres, RustFS/S3, Langfuse, and GitHub.
 - **Who may start a turn is decided in ONE function (ADR 0175, #3241).**
   `admission.admit` answers for a binding's optional `allowed_callers` list, and
   both entry points call it: `POST /channels/turns` after token verification and
-  before any claim (403 on refusal), and the platform-key-only
+  before any claim (403 with `detail: caller_not_allowed`, frozen in
+  `tests/vectors/channel-port-refusal.json`), and the platform-key-only
   `POST /channels/admission` the dispatcher asks. Do not compare caller ids
   anywhere else. The list is written only by
   `PUT /agents/{agent_id}/channels/callers`, which does NOT bump the binding

@@ -719,7 +719,7 @@ async def set_agent_channel_callers(
                         "type": "value_error",
                         "loc": ("body", "allowed_callers"),
                         "msg": f"Value error, {exc}",
-                        "input": None,
+                        "input": data.allowed_callers,
                     }
                 ]
             ) from exc
