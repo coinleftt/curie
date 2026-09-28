@@ -155,6 +155,35 @@ def test_command_hook_kills_child_on_timeout(monkeypatch, tmp_path) -> None:
     assert elapsed < 10, f"hook timeout took {elapsed:.1f}s to return"
 
 
+def test_command_hook_kills_its_group_when_cancelled(monkeypatch, tmp_path) -> None:
+    """An aborted turn cancels the hook callback; its process group must die too.
+
+    The hook runs in its own session, so nothing else would signal it.
+    """
+
+    monkeypatch.setattr(hooks, "_HOOK_TIMEOUT_S", 30)
+    pid_file = tmp_path / "grandchild.pid"
+
+    async def go() -> None:
+        with anyio.move_on_after(0.5):
+            await hooks._run_command_hook(
+                f"sleep 30 & echo $! > {pid_file}; wait",
+                {"tool_name": "Bash", "tool_input": {}},
+                Path.cwd(),
+            )
+
+    anyio.run(go)
+
+    grandchild = int(pid_file.read_text())
+    deadline = time.monotonic() + 5
+    while _process_alive(grandchild) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    alive = _process_alive(grandchild)
+    if alive:
+        os.kill(grandchild, signal.SIGKILL)
+    assert not alive, "a cancelled hook left its grandchild running (orphaned)"
+
+
 def _process_alive(pid: int) -> bool:
     """True while ``pid`` exists and is not a zombie awaiting reaping."""
 
