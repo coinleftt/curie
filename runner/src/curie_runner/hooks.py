@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -150,18 +151,21 @@ async def _run_command_hook(command: str, hook_input: Any, plugin_root: Path) ->
             stderr=asyncio.subprocess.PIPE,
             cwd=plugin_root,
             env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(plugin_root)},
+            start_new_session=True,
         )
         out, err = await asyncio.wait_for(
             proc.communicate(input=payload.encode("utf-8")), timeout=_HOOK_TIMEOUT_S
         )
     except (TimeoutError, OSError) as exc:
-        # A timed-out hook leaves its shell child still running; kill it so it
-        # doesn't orphan (an OSError from create_subprocess_exec itself has no
-        # live proc to clean up). Best-effort: an already-dead child raising
+        # A timed-out hook leaves its shell and everything the shell started
+        # still running. The hook runs in its own session, so killing the
+        # process group reaches the grandchildren too; killing only the shell
+        # would orphan them (an OSError from create_subprocess_exec itself has
+        # no live proc to clean up). Best-effort: an already-dead group raising
         # ProcessLookupError must not mask the original timeout/OSError.
         if proc is not None and proc.returncode is None:
             try:
-                proc.kill()
+                os.killpg(proc.pid, signal.SIGKILL)
                 await proc.wait()
             except ProcessLookupError:
                 pass
