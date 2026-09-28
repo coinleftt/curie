@@ -853,6 +853,7 @@ AGGREGATE_EXPRESSIONS = {
     "skill_local_result": "${{ needs.e2e-ladder.result }}",
     "local_release_result": "${{ needs.e2e-ladder-release.result }}",
     "cluster_result": "${{ needs.e2e-ladder-cluster.result }}",
+    "cluster_chart_result": "${{ needs.e2e-cluster-chart-regressions.result }}",
     "released_upgrade_result": "${{ needs.e2e-released-upgrade.result }}",
     "released_upgrade_negative_result": (
         "${{ needs.e2e-released-upgrade-negative.result }}"
@@ -1483,6 +1484,7 @@ def _aggregate_contract() -> tuple[str, dict[str, str]]:
         "e2e-ladder",
         "e2e-ladder-release",
         "e2e-ladder-cluster",
+        "e2e-cluster-chart-regressions",
         "e2e-released-upgrade",
         "e2e-released-upgrade-negative",
         "e2e-cluster-upgrade-matrix-shards",
@@ -1529,6 +1531,7 @@ def _run_aggregate(
         "skill_local_result": "skipped",
         "local_release_result": "skipped",
         "cluster_result": "skipped",
+        "cluster_chart_result": "skipped",
         "released_upgrade_result": "skipped",
         "released_upgrade_negative_result": "skipped",
         "upgrade_matrix_shards_result": "success",
@@ -1588,6 +1591,7 @@ def test_e2e_required_validates_docs_only_ladder_skips(tmp_path: Path) -> None:
             "skill_local_result": "success",
             "local_release_result": "success",
             "cluster_result": "success",
+            "cluster_chart_result": "success",
         },
         {
             "released_upgrade_selected": "true",
@@ -1684,6 +1688,22 @@ def test_aggregate_requires_upgrade_matrix_shards_success(result: str) -> None:
         {"local_release_selected": "true", "local_release_result": "failure"},
         {"cluster_selected": "true", "cluster_result": "skipped"},
         {"cluster_selected": "true", "cluster_result": "cancelled"},
+        {
+            "cluster_selected": "true",
+            "cluster_result": "success",
+            "cluster_chart_result": "failure",
+        },
+        {
+            "cluster_selected": "true",
+            "cluster_result": "success",
+            "cluster_chart_result": "skipped",
+        },
+        {
+            "cluster_selected": "true",
+            "cluster_result": "failure",
+            "cluster_chart_result": "success",
+        },
+        {"cluster_chart_result": "success"},
         {"skill_local_result": "success"},
         {"local_release_result": "success"},
         {"cluster_result": "success"},
@@ -1784,3 +1804,33 @@ def _selector_outputs_omit_kind(tmp_path: Path, path: str) -> dict[str, str]:
     completed, output = _invoke_selector(tmp_path, path, omit_kind=True)
     assert completed.returncode == 0, completed.stderr
     return dict(line.split("=", maxsplit=1) for line in output.splitlines())
+
+
+CLUSTER_RUNG_MOVED_PROOFS = {
+    "Langfuse web waits for delayed Postgres without restarting": "e2e-cluster-chart-regressions",
+    "Runner BYO egress enforces (not just rendered)": "e2e-cluster-chart-regressions",
+    "Rollout-free first invocation and dead-consumer recovery": "e2e-cluster-rollout-recovery",
+}
+
+
+def test_single_regression_proofs_run_outside_the_cluster_rung() -> None:
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    rung_steps = {step.get("name") for step in jobs["e2e-ladder-cluster"]["steps"]}
+    for name, job_id in CLUSTER_RUNG_MOVED_PROOFS.items():
+        assert name not in rung_steps, name
+        steps = [step for step in jobs[job_id]["steps"] if step.get("name") == name]
+        assert len(steps) == 1, (job_id, name)
+        assert "if" not in steps[0]
+        assert "continue-on-error" not in steps[0]
+
+    chart = jobs["e2e-cluster-chart-regressions"]
+    assert chart["if"] == "${{ needs.changes.outputs.cluster == 'true' }}"
+    assert chart["needs"] == ["changes", "ci-images"]
+    assert "e2e-cluster-chart-regressions" in jobs["e2e-required"]["needs"]
+
+    rollout = jobs["e2e-cluster-rollout-recovery"]
+    assert rollout["if"] == (
+        "${{ github.event_name != 'pull_request' && "
+        "needs.changes.outputs.cluster == 'true' }}"
+    )
+    assert "e2e-cluster-rollout-recovery" not in jobs["e2e-required"]["needs"]
