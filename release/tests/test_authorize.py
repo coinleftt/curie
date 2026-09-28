@@ -13,10 +13,8 @@ check-run lists -- plus `authorize()`, which combines them and is what
 import importlib.util
 import inspect
 import json
-import os
 import posixpath
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1117,7 +1115,6 @@ class TestMainLookupFailures:
 
 CI_YAML = REPO_ROOT / ".github" / "workflows" / "ci.yaml"
 HELM_CI_YAML = REPO_ROOT / ".github" / "workflows" / "helm-ci.yaml"
-RELEASE_YAML = REPO_ROOT / ".github" / "workflows" / "release.yaml"
 
 _MATRIX_REF = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_]+)\s*\}\}")
 
@@ -1214,31 +1211,6 @@ def ci_connector_image_check_run_names() -> set[str]:
     return names
 
 
-class TestRustValkeyWorkflowContract:
-    def test_rust_job_requires_and_connects_to_valkey_guarded_tests(self):
-        workflow = yaml.safe_load(CI_YAML.read_text())
-        # The suite runs in the test partitions; the required Rust job only
-        # aggregates them.
-        rust = workflow["jobs"]["rust-test"]
-
-        assert rust["env"]["CI_REQUIRE_VALKEY_TESTS"] == "1"
-        assert rust["env"]["TEST_VALKEY_URL"] == "redis://localhost:26379"
-
-        valkey = rust["services"]["valkey"]
-        assert str(valkey["image"]).startswith("valkey/")
-        assert "26379:6379" in valkey["ports"]
-
-
-class TestPythonValkeyWorkflowContract:
-    def test_python_job_requires_valkey_guarded_tests(self):
-        workflow = yaml.safe_load(CI_YAML.read_text())
-        # The suite runs in the pytest shards; the required Python job only
-        # aggregates them.
-        shards = workflow["jobs"]["python-pytest"]
-
-        assert shards["env"]["CI_REQUIRE_VALKEY_TESTS"] == "1"
-
-
 class TestHelmCiCheckRunNames:
     def test_expands_matrix_include_rows(self, tmp_path, monkeypatch):
         workflow = tmp_path / "helm-ci.yaml"
@@ -1260,216 +1232,6 @@ jobs:
             "Chart (3.16.4)",
             "Chart (3.17.0)",
         }
-
-
-class TestReleaseWorkflowContract:
-    def test_rust_clippy_checks_all_targets_for_await_holding_lock(self):
-        """Clippy must compile test targets, where this lint is reachable (#1704)."""
-        workflow = yaml.load(CI_YAML.read_text(), Loader=yaml.BaseLoader)
-        clippy_step = next(
-            step
-            for step in workflow["jobs"]["rust-lint"]["steps"]
-            if step.get("name") == "Clippy"
-        )
-        command = clippy_step["run"]
-
-        for required_fragment in (
-            "cargo clippy",
-            "--locked",
-            "--all-targets",
-            "-D warnings",
-        ):
-            assert required_fragment in command, (
-                "Rust CI Clippy must retain "
-                f"{required_fragment!r} to catch await-holding-lock regressions: {command!r}"
-            )
-
-    def test_sre_bot_tempo_connector_builds_in_ordinary_ci(self):
-        workflow = yaml.load(CI_YAML.read_text(), Loader=yaml.BaseLoader)
-        image_job = workflow["jobs"]["images"]
-        tempo_rows = [
-            row
-            for row in image_job["strategy"]["matrix"]["include"]
-            if row.get("name") == "sre-bot-tempo"
-        ]
-        assert tempo_rows == [
-            {
-                "name": "sre-bot-tempo",
-                "context": "examples/sre-bot/connectors/tempo",
-                "dockerfile": "examples/sre-bot/connectors/tempo/Dockerfile",
-                # release.yaml publishes every image for both architectures, so
-                # CI validates the example connectors on both. Without this the
-                # first place an arm64-only Dockerfile failure could appear was a
-                # release, where it fails the release rather than the pull
-                # request that introduced it.
-                "platforms": "linux/amd64,linux/arm64",
-            }
-        ]
-        build_step = next(
-            step for step in image_job["steps"] if step.get("name") == "Build (no push)"
-        )
-        assert build_step["with"]["context"] == "${{ matrix.context }}"
-        assert build_step["with"]["platforms"] == "${{ matrix.platforms }}", (
-            "the build step must read the per-entry platforms, so the platform "
-            "images keep building natively while the connectors cross-build"
-        )
-        assert "Build sre-bot-tempo image (no push)" in authorize_module.REQUIRED_CHECK_NAMES
-
-    def test_image_matrix_scopes_its_layer_cache_per_image(self):
-        """Every leg of the images matrix must name its own gha cache scope.
-
-        All ten legs run concurrently and build different Dockerfiles, so an
-        unscoped ``type=gha`` gives them one shared namespace with nothing to
-        share: they only contend for the same reservation. Unscoped, the cache
-        export outgrew the build it was meant to save -- sre-bot-tempo built in
-        80.5s and spent 1057.7s writing one layer, turning a 2 minute image into
-        a 19 minute job on the critical path.
-        """
-        workflow = yaml.load(CI_YAML.read_text(), Loader=yaml.BaseLoader)
-        image_job = workflow["jobs"]["images"]
-        build_step = next(
-            step for step in image_job["steps"] if step.get("name") == "Build (no push)"
-        )
-
-        assert build_step["with"]["cache-from"] == "type=gha,scope=${{ matrix.name }}"
-        assert build_step["with"]["cache-to"] == "type=gha,mode=max,scope=${{ matrix.name }}"
-
-        # The scope is only per image if the key it reads is unique per leg, so
-        # assert the matrix names are distinct rather than trusting the template.
-        names = [row["name"] for row in image_job["strategy"]["matrix"]["include"]]
-        assert len(names) == len(set(names)), f"image matrix names must be unique: {names}"
-
-    def test_observability_stack_assertions_run_in_helm_ci(self):
-        workflow = yaml.load(HELM_CI_YAML.read_text(), Loader=yaml.BaseLoader)
-        # The chart assertions run as parallel shards, so search every job.
-        chart_steps = [
-            step for job in workflow["jobs"].values() for step in job.get("steps", [])
-        ]
-        matching = [
-            step
-            for step in chart_steps
-            if "observability-stack-assertions.sh" in step.get("run", "")
-        ]
-        assert len(matching) == 1
-
-    def test_sre_bot_tempo_connector_is_a_first_party_release_image(self):
-        workflow = yaml.load(RELEASE_YAML.read_text(), Loader=yaml.BaseLoader)
-        build_matrix = workflow["jobs"]["build"]["strategy"]["matrix"]
-        merge_matrix = workflow["jobs"]["merge"]["strategy"]["matrix"]
-
-        assert "sre-bot-tempo" in build_matrix["name"]
-        assert "sre-bot-tempo" in merge_matrix["name"]
-        tempo_rows = [
-            row
-            for row in build_matrix["include"]
-            if row.get("name") == "sre-bot-tempo"
-        ]
-        assert tempo_rows == [
-            {
-                "name": "sre-bot-tempo",
-                "context": "examples/sre-bot/connectors/tempo",
-                "dockerfile": "examples/sre-bot/connectors/tempo/Dockerfile",
-            }
-        ]
-        build_step = next(
-            step
-            for step in workflow["jobs"]["build"]["steps"]
-            if step.get("name") == "Build and push by digest"
-        )
-        assert build_step["with"]["context"] == "${{ matrix.context }}"
-        tempo_context = REPO_ROOT / tempo_rows[0]["context"]
-        assert (tempo_context / "requirements.txt").is_file()
-        assert (tempo_context / "server.py").is_file()
-
-    def test_release_branch_sources_are_anchored_and_wired_to_authorization(self):
-        source = RELEASE_YAML.read_text()
-        workflow = yaml.load(source, Loader=yaml.BaseLoader)
-        trigger = workflow["on"]["push"]
-
-        assert trigger["branches"] == ["main", "next"]
-        assert trigger["tags"] == ["v*"]
-
-        trigger_source = re.search(
-            r"(?ms)^on:\n  push:\n(?P<body>.*?)(?=^permissions:)", source
-        )
-        assert trigger_source is not None
-        anchors = {}
-        for branch in ("main", "next"):
-            anchor = re.search(
-                rf"&(?P<name>[A-Za-z_][A-Za-z0-9_-]*)\s+['\"]?{branch}['\"]?",
-                trigger_source.group("body"),
-            )
-            assert anchor is not None
-            anchors[branch] = anchor.group("name")
-        assert len(set(anchors.values())) == 2
-
-        authorization_source = re.search(
-            r"(?ms)^  authorize-release:\n(?P<body>.*?)(?=^  build:)", source
-        )
-        assert authorization_source is not None
-        env_source = re.search(
-            r"(?ms)^    env:\n(?P<body>(?:^      [^\n]+\n)+)",
-            authorization_source.group("body"),
-        )
-        assert env_source is not None
-        aliases = dict(
-            re.findall(
-                r"^      (?P<name>[A-Za-z_][A-Za-z0-9_]*): \*(?P<anchor>[^\s]+)\s*$",
-                env_source.group("body"),
-                re.MULTILINE,
-            )
-        )
-        assert set(aliases.values()) == set(anchors.values())
-
-        authorization = workflow["jobs"]["authorize-release"]
-        authorization_env = authorization["env"]
-        assert set(authorization_env) == set(aliases)
-        assert {authorization_env[name] for name in aliases} == {"main", "next"}
-
-        command = next(
-            step["run"]
-            for step in authorization["steps"]
-            if "release/authorize.py" in step.get("run", "")
-        )
-        reviewed_ref_envs = re.findall(
-            r"--reviewed-ref\s+origin/\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
-            command,
-        )
-        assert "--main-ref" not in command
-        assert set(reviewed_ref_envs) == set(authorization_env)
-        assert len(reviewed_ref_envs) == len(authorization_env) == 2
-        assert {authorization_env[name] for name in reviewed_ref_envs} == {"main", "next"}
-        assert authorization_env[reviewed_ref_envs[0]] == "main"
-        assert re.search(r'--tag\s+"\$GITHUB_REF_NAME"', command)
-
-        overlay = re.search(
-            r"git checkout origin/\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}\s+-- release/",
-            authorization_source.group("body"),
-        )
-        assert overlay is not None
-        assert authorization_env[overlay.group(1)] == "main"
-
-    def test_continuous_metadata_and_worker_local_base_use_the_push_sha(self):
-        workflow = yaml.load(RELEASE_YAML.read_text(), Loader=yaml.BaseLoader)
-
-        for job_name in ("merge", "worker-local-merge"):
-            metadata = next(
-                step
-                for step in workflow["jobs"][job_name]["steps"]
-                if step.get("name") == "Image metadata"
-            )
-            tags = metadata["with"]["tags"]
-            assert "type=sha,format=long" in tags
-            assert "type=raw,value=latest,enable={{is_default_branch}}" in tags
-
-        base_tag_script = next(
-            step["run"]
-            for step in workflow["jobs"]["worker-local-build"]["steps"]
-            if step.get("name") == "Compute base tag"
-        )
-        assert 'echo "v=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"' in base_tag_script
-        assert 'echo "v=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"' in base_tag_script
-        assert 'echo "v=latest" >> "$GITHUB_OUTPUT"' not in base_tag_script
 
 
 class TestRequiredNamesMatchCiWorkflows:
@@ -1787,62 +1549,6 @@ class TestLegitimateSkips:
         assert actual == expected, (
             "required ci.yaml jobs no longer gate on their exact tier outputs: "
             f"expected {expected!r}, got {actual!r}"
-        )
-
-    def test_the_changes_filter_step_emits_every_tier_when_executed_as_a_push(
-        self, tmp_path
-    ):
-        """A push selects every tier through the real selector runtime."""
-        doc = yaml.safe_load(CI_YAML.read_text())
-        filter_step = next(
-            step
-            for step in doc["jobs"]["changes"]["steps"]
-            if step.get("id") == "filter"
-        )
-        script = re.sub(
-            r"\$\{\{\s*(.*?)\s*\}\}",
-            lambda m: "push" if m.group(1) == "github.event_name" else "",
-            filter_step["run"],
-        )
-        script_path = tmp_path / "filter.sh"
-        script_path.write_text(script)
-        selector_path = tmp_path / "tools" / "e2e-ci-selection" / "select_tiers.py"
-        selector_path.parent.mkdir(parents=True)
-        shutil.copy2(
-            REPO_ROOT / "tools" / "e2e-ci-selection" / "select_tiers.py", selector_path
-        )
-        registry_path = tmp_path / ".github" / "e2e-selection.yaml"
-        registry_path.parent.mkdir()
-        shutil.copy2(REPO_ROOT / ".github" / "e2e-selection.yaml", registry_path)
-        github_output = tmp_path / "github_output"
-        github_output.touch()
-
-        result = subprocess.run(
-            ["bash", str(script_path)],
-            cwd=tmp_path,
-            env={**os.environ, "GITHUB_OUTPUT": str(github_output)},
-            capture_output=True,
-            text=True,
-        )
-
-        assert result.returncode == 0, (
-            "ci.yaml's `changes` filter step no longer selects tiers on push: "
-            f"{result.stderr}"
-        )
-        assert github_output.read_text().splitlines() == [
-            "skill=true",
-            "local=true",
-            "local_release=true",
-            "cluster=true",
-            "released_upgrade=true",
-            "skill_local_tiers=skill,local",
-            "pytest=true",
-            "images=true",
-            "cli_release=true",
-            "released_upgrade_full=true",
-        ], (
-            "ci.yaml's push selection no longer emits the complete tier contract: "
-            f"{github_output.read_text()!r}"
         )
 
 

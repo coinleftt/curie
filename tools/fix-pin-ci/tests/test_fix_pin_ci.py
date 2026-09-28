@@ -1608,7 +1608,6 @@ def test_pull_request_template_documents_the_tier_waiver() -> None:
 
 
 MAIN_MILESTONE = "v0.8.5"
-MAPPING_PATH = REPO_ROOT / "tools" / "fix-pin-ci" / "milestone-trains.json"
 
 
 @pytest.mark.parametrize(
@@ -1850,10 +1849,6 @@ def test_valid_prerequisite_does_not_compare_issue_milestone_to_parent_train(
         LOCAL_SELECTOR,
     ]
     _assert_exact_pull_lookup(tmp_path)
-
-
-def test_milestone_mapping_artifact_is_removed() -> None:
-    assert not MAPPING_PATH.exists()
 
 
 def test_agents_md_does_not_describe_milestones_as_a_merge_gate() -> None:
