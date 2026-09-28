@@ -929,7 +929,8 @@ def test_workflow_consumes_each_selection_output_exactly() -> None:
     assert jobs["ui-image-smoke"]["if"] == jobs["images"]["if"]
     assert jobs["repo-toolchain-proof"]["if"] == jobs["images"]["if"]
     assert jobs["cli-portability"]["if"] == (
-        "${{ needs.changes.outputs.cli_release == 'true' }}"
+        "${{ github.event_name != 'pull_request' && "
+        "needs.changes.outputs.cli_release == 'true' }}"
     )
     assert jobs["cli-darwin"]["if"] == jobs["cli-portability"]["if"]
     assert "changes" in jobs["rust-build"]["needs"]
@@ -1417,7 +1418,8 @@ def test_released_upgrade_workflow_pins_issue_2097_live_manifest_parity() -> Non
     )
     helm_runs = "\n".join(
         step.get("run", "")
-        for step in helm_ci["jobs"]["helm"]["steps"]
+        for job in helm_ci["jobs"].values()
+        for step in job.get("steps", [])
         if isinstance(step.get("run"), str)
     )
     assert "charts/curie/ci/live-manifest-parity-assertions.sh" in helm_runs
