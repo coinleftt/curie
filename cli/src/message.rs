@@ -2145,6 +2145,7 @@ async fn hint_channel(
     turn_channel: &str,
     id: &str,
     deadline: Instant,
+    budget: Duration,
 ) -> String {
     let lookup = async {
         // The port-forward guard is bound HERE, in the enclosing async block,
@@ -2199,7 +2200,7 @@ async fn hint_channel(
     // it is decorating (#1531; `cli/src/chat.rs:497-499`). Reuses the same
     // `capped` helper the resume scan uses rather than a second copy of the
     // bound.
-    match tokio::time::timeout(capped(HINT_CHANNEL_LOOKUP_BUDGET, deadline), lookup).await {
+    match tokio::time::timeout(capped(budget, deadline), lookup).await {
         // A present, non-empty card channel is the only real answer. The
         // emptiness guard is load-bearing, not defensive: the server reads
         // `approval.card_channel or approval.reply_channel`, and in Python
@@ -2374,7 +2375,15 @@ async fn resume_after_approval(
         last_hint_channel = if ui.json() {
             channel.to_string()
         } else {
-            hint_channel(opts, verb, channel, &current_id, deadline).await
+            hint_channel(
+                opts,
+                verb,
+                channel,
+                &current_id,
+                deadline,
+                HINT_CHANNEL_LOOKUP_BUDGET,
+            )
+            .await
         };
         // Recompute AFTER the lookup, because the lookup itself consumes turn
         // time. The pre-lookup value is stale by up to the whole lookup budget,
@@ -2564,7 +2573,15 @@ async fn resume_cluster_after_approval(
         last_hint_channel = if ui.json() {
             channel.to_string()
         } else {
-            hint_channel(opts, TurnVerb::Cluster, channel, &current_id, deadline).await
+            hint_channel(
+                opts,
+                TurnVerb::Cluster,
+                channel,
+                &current_id,
+                deadline,
+                HINT_CHANNEL_LOOKUP_BUDGET,
+            )
+            .await
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -5336,6 +5353,7 @@ mod tests {
     //         turn_channel: &str,
     //         id: &str,
     //         deadline: Instant,
+    //         budget: Duration,
     //     ) -> String
     //
     // The `deadline` parameter is the turn's overall deadline, NOT this
@@ -5343,6 +5361,8 @@ mod tests {
     // `capped(HINT_CHANNEL_LOOKUP_BUDGET, deadline)` (`cli/src/chat.rs:86`), so
     // a short `--timeout-secs` shortens the lookup rather than being overrun by
     // it. See `the_lookup_budget_is_capped_by_what_is_left_of_the_turns_deadline`.
+    // `budget` is a parameter so the stalling-peer tests can exercise the bound
+    // with a fraction of a second instead of waiting out the production ten.
     //
     // and, as part of the same contract, the bound it is capped against:
     //
@@ -5499,6 +5519,7 @@ mod tests {
             HINT_TURN_CHANNEL,
             HINT_APPROVAL_ID,
             hint_far_deadline(),
+            HINT_CHANNEL_LOOKUP_BUDGET,
         )
         .await;
 
@@ -5546,6 +5567,7 @@ mod tests {
             HINT_TURN_CHANNEL,
             HINT_APPROVAL_ID,
             hint_far_deadline(),
+            HINT_CHANNEL_LOOKUP_BUDGET,
         )
         .await;
         let elapsed = started.elapsed();
@@ -5590,6 +5612,10 @@ mod tests {
     async fn a_stalled_api_is_cut_off_at_the_budget_rather_than_hanging_the_turn() {
         let (base, stall) = hint_stalling_peer().await;
         let opts = hint_opts(&base);
+        // A short budget stands in for the production one: the bound is the
+        // same code path either way, and waiting out ten real seconds proves
+        // nothing a half second does not.
+        let budget = Duration::from_millis(500);
 
         let started = Instant::now();
         // The outer bound is the test harness's own safety net, deliberately
@@ -5597,18 +5623,19 @@ mod tests {
         // forgot the inner timeout would hang this test forever and block CI
         // instead of failing it. Its expiry IS the failure signal.
         let resolved = tokio::time::timeout(
-            HINT_CHANNEL_LOOKUP_BUDGET * 3,
+            budget * 20,
             hint_channel(
                 &opts,
                 TurnVerb::Local,
                 HINT_TURN_CHANNEL,
                 HINT_APPROVAL_ID,
                 hint_far_deadline(),
+                budget,
             ),
         )
         .await
         .expect(
-            "the lookup never returned within three budgets against a stalled peer, so nothing \
+            "the lookup never returned within twenty budgets against a stalled peer, so nothing \
              is bounding it: a real turn would sit here forever",
         );
         let elapsed = started.elapsed();
@@ -5624,12 +5651,12 @@ mod tests {
         // error path that happened to answer quickly and would leave the real
         // stall unbounded. Upper bound: proves the budget actually fired.
         assert!(
-            elapsed >= HINT_CHANNEL_LOOKUP_BUDGET,
+            elapsed >= budget,
             "returning before the budget means the stall was not reached and \
              this test proved nothing about the bound; took {elapsed:?}"
         );
         assert!(
-            elapsed < HINT_CHANNEL_LOOKUP_BUDGET * 3,
+            elapsed < budget * 4,
             "the lookup must be cut off at its own budget, not left to some \
              wider deadline; took {elapsed:?}"
         );
@@ -5661,20 +5688,24 @@ mod tests {
     async fn the_lookup_budget_is_capped_by_what_is_left_of_the_turns_deadline() {
         let (base, stall) = hint_stalling_peer().await;
         let opts = hint_opts(&base);
-        // A turn with one second left, against a peer that never answers.
-        let deadline = Instant::now() + Duration::from_secs(1);
+        // A turn with a fifth of a second left, against a peer that never
+        // answers, and a budget twenty times that so only the deadline can end
+        // the lookup early.
+        let budget = Duration::from_secs(4);
+        let deadline = Instant::now() + Duration::from_millis(200);
 
         let started = Instant::now();
         // Same harness safety net as above: an implementation that ignored the
         // deadline would otherwise hang CI instead of failing it.
         let resolved = tokio::time::timeout(
-            HINT_CHANNEL_LOOKUP_BUDGET * 3,
+            budget * 3,
             hint_channel(
                 &opts,
                 TurnVerb::Local,
                 HINT_TURN_CHANNEL,
                 HINT_APPROVAL_ID,
                 deadline,
+                budget,
             ),
         )
         .await
@@ -5690,15 +5721,15 @@ mod tests {
             "a deadline that expires mid-lookup is 'no answer' like any other, \
              so the hint still degrades to the turn channel"
         );
-        // Half a budget, not the one second itself: the deadline is what must
+        // Half the budget, not the deadline itself: the deadline is what must
         // end this, and anything at or near the full budget means the turn's
         // remaining time was ignored. The slack is deliberately wide so a loaded
         // machine cannot flake it, while still being far below the value a
         // deadline-blind implementation would produce.
         assert!(
-            elapsed < HINT_CHANNEL_LOOKUP_BUDGET / 2,
-            "with one second left on the turn, the lookup must end in about one \
-             second, not run its full budget: a `--timeout-secs 1` turn would \
+            elapsed < budget / 2,
+            "with a fifth of a second left on the turn, the lookup must end in \
+             about that, not run its full budget: a `--timeout-secs 1` turn would \
              otherwise take about eleven seconds and break the hard bound \
              `cli/src/chat.rs:497-499` promises. Took {elapsed:?}"
         );
@@ -5725,6 +5756,7 @@ mod tests {
             HINT_TURN_CHANNEL,
             HINT_APPROVAL_ID,
             hint_far_deadline(),
+            HINT_CHANNEL_LOOKUP_BUDGET,
         )
         .await;
 
@@ -5763,6 +5795,7 @@ mod tests {
             HINT_TURN_CHANNEL,
             HINT_APPROVAL_ID,
             hint_far_deadline(),
+            HINT_CHANNEL_LOOKUP_BUDGET,
         )
         .await;
 
@@ -5812,6 +5845,7 @@ mod tests {
             HINT_TURN_CHANNEL,
             HINT_APPROVAL_ID,
             hint_far_deadline(),
+            HINT_CHANNEL_LOOKUP_BUDGET,
         )
         .await;
 
@@ -5849,6 +5883,7 @@ mod tests {
             HINT_TURN_CHANNEL,
             HINT_APPROVAL_ID,
             hint_far_deadline(),
+            HINT_CHANNEL_LOOKUP_BUDGET,
         )
         .await;
 
@@ -6010,6 +6045,7 @@ mod tests {
                 HINT_TURN_CHANNEL,
                 HINT_APPROVAL_ID,
                 hint_far_deadline(),
+                HINT_CHANNEL_LOOKUP_BUDGET,
             ),
         )
         .await
