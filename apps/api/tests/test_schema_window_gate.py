@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from _migration_support import run_script
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CHECKER = REPO_ROOT / "scripts" / "check-schema-window.py"
@@ -111,25 +112,24 @@ def _write_linear_migrations(repo_root: Path) -> None:
 
 
 def _run_gate(repo_root: Path | None = None) -> subprocess.CompletedProcess[str]:
-    command = [sys.executable, str(CHECKER)]
-    if repo_root is not None:
-        command.extend(["--repo-root", str(repo_root)])
-    return subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    args = [] if repo_root is None else ["--repo-root", str(repo_root)]
+    return run_script(CHECKER, *args)
 
 
 def test_real_tree_window_matches_alembic_head() -> None:
+    """The one real CLI run; every other case drives the gate in-process."""
     chart = yaml.safe_load((REPO_ROOT / "charts" / "curie" / "Chart.yaml").read_text())
     app_version = str(chart["appVersion"])
     catalog = json.loads(
         (REPO_ROOT / "cli" / "src" / "application_schema_windows.json").read_text()
     )
-    result = _run_gate()
+    result = subprocess.run(
+        [sys.executable, str(CHECKER)],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
     assert result.returncode == 0, result.stderr
     assert app_version in catalog["windows"]
