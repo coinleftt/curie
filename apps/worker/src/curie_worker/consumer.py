@@ -348,13 +348,24 @@ class Consumer(StreamConsumer):
                 exc_info=True,
             )
         finally:
-            await self._waits.finish_notice(
-                record.event_id,
-                record.generation,
-                token,
-                delivered=delivered,
-                reply_ref=reply_ref,
+            # Cancellation of the notice loop must not skip this write. The
+            # lock is what stops a wake from finishing the turn while the
+            # queued edit is still in flight; leaving it behind, or leaving
+            # notice_pending set, lets that edit land after the answer.
+            finish = asyncio.create_task(
+                self._waits.finish_notice(
+                    record.event_id,
+                    record.generation,
+                    token,
+                    delivered=delivered,
+                    reply_ref=reply_ref,
+                )
             )
+            try:
+                await asyncio.shield(finish)
+            except asyncio.CancelledError:
+                await finish
+                raise
 
     async def _repair_wait_notices(self) -> None:
         for record in await self._waits.notices_due():
@@ -394,13 +405,20 @@ class Consumer(StreamConsumer):
                     exc_info=True,
                 )
             finally:
-                await self._waits.finish_expiry_notice(
-                    record.event_id,
-                    record.generation,
-                    token,
-                    delivered=delivered,
-                    reply_ref=reply_ref,
+                finish = asyncio.create_task(
+                    self._waits.finish_expiry_notice(
+                        record.event_id,
+                        record.generation,
+                        token,
+                        delivered=delivered,
+                        reply_ref=reply_ref,
+                    )
                 )
+                try:
+                    await asyncio.shield(finish)
+                except asyncio.CancelledError:
+                    await finish
+                    raise
 
     async def _expire_wait_delivery(
         self,
