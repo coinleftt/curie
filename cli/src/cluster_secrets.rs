@@ -697,33 +697,36 @@ pub fn runner_base_verdict(
     let (reference, pinned) = match installed {
         Ok(found) => found,
         Err(reason) => {
+            let fix = "confirm the release is healthy with `curie cluster status` and that \
+                       its runner image resolves in its registry, then redeploy";
+            // The human presenter prints only the message, so the fix is
+            // composed into it as well as carried for `--json` (#3423).
             return Err(anyhow::Error::from(
                 crate::exit::CliError::usage(format!(
                     "this bundle's runner layer was built on {recorded_base}, but the \
                      installation's runner could not be determined ({reason}), so the deploy \
                      cannot prove the worker serves that base. Refusing rather than risk an \
-                     old runner under a new worker."
+                     old runner under a new worker; {fix}."
                 ))
-                .with_fix(
-                    "confirm the release is healthy with `curie cluster status` and that its \
-                     runner image resolves in its registry, then redeploy",
-                ),
+                .with_fix(fix),
             ));
         }
     };
     if same_runner(recorded_base, &pinned) {
         return Ok(());
     }
+    let fix = format!(
+        "run `curie build --plugin-dir {} --registry <ref> --runner-image {reference}` and \
+         redeploy",
+        plugin_dir.display()
+    );
     Err(anyhow::Error::from(
         crate::exit::CliError::usage(format!(
             "this bundle's runner layer was built on {recorded_base}, but the installation \
-             runs {pinned}. A layer on another base is a runner this worker may not serve."
+             runs {pinned}. A layer on another base is a runner this worker may not serve; \
+             {fix}."
         ))
-        .with_fix(format!(
-            "run `curie build --plugin-dir {} --registry <ref> --runner-image {reference}` and \
-             redeploy",
-            plugin_dir.display()
-        )),
+        .with_fix(fix),
     ))
 }
 
@@ -1523,6 +1526,16 @@ esac
             message.contains(RUNNER_B) && message.contains(RUNNER_A),
             "{message}"
         );
+        // #3423: the human presenter shows only the message, so the rebuild
+        // command must be part of it, not only of the `--json` fix.
+        let (human, _) = crate::exit::present_error(&err);
+        assert!(
+            human.contains(
+                "curie build --plugin-dir /bundles/sre-bot --registry <ref> --runner-image \
+                 ghcr.io/curie-eng/curie-runner:0.10.0"
+            ),
+            "{human}"
+        );
         assert_eq!(
             fix.as_deref(),
             Some(
@@ -1545,6 +1558,8 @@ esac
             message.contains("could not be determined") && message.contains("boom"),
             "{message}"
         );
+        // #3423: the remedy reaches human output, not only `--json`.
+        assert!(message.contains("curie cluster status"), "{message}");
     }
 
     #[test]
