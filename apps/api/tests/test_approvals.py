@@ -298,6 +298,27 @@ def _read_resumed_at(approval_id: str) -> datetime | None:
     return asyncio.run(_run())
 
 
+def _lapse(approval_id: str) -> datetime:
+    """Move the approval's ``expires_at`` an hour into the past, so its SLA has
+    lapsed without the test sleeping out a real expiry window, and return the
+    new deadline. Same fresh-engine shape as ``_read_resumed_at``."""
+
+    async def _run() -> datetime:
+        engine = create_async_engine(get_settings().database_url)
+        sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with sessionmaker() as session:
+                approval = await session.get(Approval, uuid.UUID(approval_id))
+                assert approval is not None and approval.expires_at is not None
+                approval.expires_at -= timedelta(hours=1)
+                await session.commit()
+                return approval.expires_at
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(_run())
+
+
 def _read_reply_placeholder(approval_id: str) -> str | None:
     """Read the stored reply target without relying on the API response model."""
 
@@ -693,7 +714,7 @@ def test_late_expiry_transition_and_resume_parent_to_the_stored_turn(
         json=_payload(expires_in_seconds=1),
         headers={**auth_headers, "traceparent": _TRACEPARENT},
     ).json()
-    time.sleep(1.1)
+    _lapse(created["id"])
 
     with _captured_approval_spans() as exporter:
         expired = approvals_client.post(
@@ -918,7 +939,7 @@ def test_expired_approval_resolve_returns_410_and_resumes(
         "/approvals", json=payload, headers=auth_headers
     ).json()
     assert created["expires_at"] is not None
-    time.sleep(1.1)
+    _lapse(created["id"])
 
     resolved = approvals_client.post(
         f"/approvals/{created['id']}/resolve",
@@ -1779,7 +1800,7 @@ def test_resolve_path_expiry_returns_410_even_if_enqueue_fails(
         "/approvals", json=payload, headers=auth_headers
     ).json()
     assert created["expires_at"] is not None
-    time.sleep(1.1)
+    _lapse(created["id"])
 
     async def _boom(*a: Any, **k: Any) -> str:
         raise RuntimeError("valkey down")
@@ -1851,7 +1872,7 @@ def test_resolve_path_expiry_returns_410_when_the_resumed_mark_fails(
         "/approvals", json=payload, headers=auth_headers
     ).json()
     assert created["expires_at"] is not None
-    time.sleep(1.1)
+    lapsed_at = _lapse(created["id"])
 
     real_mark = crud.mark_approval_resumed
 
@@ -1878,7 +1899,7 @@ def test_resolve_path_expiry_returns_410_when_the_resumed_mark_fails(
 
     # The 410 still names the expiry deadline. This is what the hoist protects: a
     # lazy reload after the rollback 500s before this body is ever built.
-    deadline = str(datetime.fromisoformat(created["expires_at"]))
+    deadline = str(lapsed_at)
     assert deadline in resolved.json()["detail"]
 
     # The SLA flip committed independently of the failed mark.
