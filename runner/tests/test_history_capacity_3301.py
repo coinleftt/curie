@@ -20,8 +20,8 @@ from curie_runner.history import (
     TurnRecord,
 )
 from curie_runner.session import _history_capacity_lines
-
-from .test_history_capacity_2927 import _KEY, _CappedCasState
+from runner_state_fake import TRANSCRIPT_KEY as _KEY
+from runner_state_fake import CappedCasState
 
 # The API default (apps/api config ``transcript_max_thread_bytes``, chart value
 # ``api.transcriptMaxThreadBytes``). The API suite pins the same number.
@@ -77,7 +77,7 @@ def _factory_turn(rounds: int = 3) -> TurnRecord:
     return TurnRecord(user=_USER, assistant=answer, messages=tuple(messages))
 
 
-def _append(state: _CappedCasState, record: TurnRecord) -> None:
+def _append(state: CappedCasState, record: TurnRecord) -> None:
     async def go() -> None:
         async with TestServer(state.app()) as server:
             store = StateApiTranscriptStore(str(server.make_url(_KEY)), token=None)
@@ -87,7 +87,7 @@ def _append(state: _CappedCasState, record: TurnRecord) -> None:
 
 
 def test_factory_turn_persists_at_the_default_cap() -> None:
-    state = _CappedCasState(max_bytes=_DEFAULT_CAP)
+    state = CappedCasState(max_bytes=_DEFAULT_CAP)
     _append(state, _factory_turn())
 
     assert state.value is not None
@@ -98,7 +98,7 @@ def test_factory_turn_persists_at_the_default_cap() -> None:
 
 
 def test_unboundable_turn_names_its_size_and_the_cap() -> None:
-    state = _CappedCasState(max_bytes=_OLD_CAP)
+    state = CappedCasState(max_bytes=_OLD_CAP)
     with pytest.raises(HistoryCapacityError) as caught:
         _append(state, _factory_turn())
 
