@@ -60,7 +60,9 @@ get_settings.cache_clear()
 # It is intentionally distinct from the platform key: sharing those keys would
 # let any platform-key holder forge the Slack identity/channel proof ADR-0106
 # requires the dispatcher alone to attest.
-os.environ.setdefault("CURIE_APPROVAL_CHAT_ATTESTER_SECRET", "approval-chat-attester-test-secret")
+os.environ.setdefault(
+    "CURIE_APPROVAL_CHAT_ATTESTER_SECRET", "approval-chat-attester-test-secret"
+)
 
 DB_PREFIX = "curie_test_"
 TS_FORMAT = "%Y%m%d%H%M%S"
@@ -131,11 +133,15 @@ def _disposable_db() -> Any:
     # database. Any db-touching fixture (client, migrated, clean_db) pulls this
     # in, which sets DATABASE_URL before the app engine or alembic is created.
     base = make_url(get_settings().database_url)
-    run_db = f"{DB_PREFIX}{datetime.now(UTC).strftime(TS_FORMAT)}_{secrets.token_hex(3)}"
+    run_db = (
+        f"{DB_PREFIX}{datetime.now(UTC).strftime(TS_FORMAT)}_{secrets.token_hex(3)}"
+    )
     asyncio.run(_provision(base, run_db))
 
     # Point the app + alembic at the disposable DB for the rest of the session.
-    os.environ["DATABASE_URL"] = base.set(database=run_db).render_as_string(hide_password=False)
+    os.environ["DATABASE_URL"] = base.set(database=run_db).render_as_string(
+        hide_password=False
+    )
     get_settings.cache_clear()
     try:
         # Inside the try so a failed migration still drops the run's database.
