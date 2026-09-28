@@ -89,6 +89,11 @@ _CONNECTOR_RECOVERY_BUDGET_SECONDS = 20.0
 _HISTORY_PERSISTENCE_BUDGET_SECONDS = 15.0
 _HISTORY_REPLAY_EXPORT_BUDGET_SECONDS = 5.0
 _CAPACITY_ADMISSION_TIMEOUT_S = 30.0
+# How long a turn waits, before sending its own query, for the terminal result
+# an abandoned predecessor left on the shared SDK stream (#3425). The abandoned
+# turn was already interrupted, so the CLI normally answers within seconds; a
+# CLI that never does is recycled rather than waited on.
+_ABANDONED_TURN_DRAIN_TIMEOUT_S = 30.0
 _CAPACITY_ADMISSION_HISTORY = 1024
 # Re-dials the connectors named by the current failures and returns the ones
 # still failing (#2634). Bound by ``build_runner`` over the materialized servers.
@@ -335,6 +340,14 @@ class SessionRunner:
         # stray unbalanced release raises ValueError instead of silently
         # over-permitting two concurrent turns on the single SDK generator.
         self._turn_lock = anyio.Semaphore(1, max_value=1)
+        # True from the moment a turn sends its query until that turn consumes
+        # the SDK's terminal ResultMessage (#3425). The SDK delivers every turn
+        # from one shared message queue, so a turn that ends without reading its
+        # result (abandoned by a dead worker, budget or auth halt, a raised
+        # iterator) leaves that result queued. The next turn must discard it
+        # before querying, or it reads the stale result as its own and every
+        # later turn answers its predecessor's prompt.
+        self._result_pending = False
         self._interrupt_requested = False
         # Timeout is deliberately distinct from an ACI/operator interrupt: the
         # former is a failed delivery boundary while the latter is an intentional
@@ -650,6 +663,7 @@ class SessionRunner:
                 await self._session.close()
             self._session = self._factory()
             await self._session.connect()
+            self._result_pending = False
             self._interrupt_requested = False
             self._timeout_requested = False
             self._timeout_interrupt_settled = None
@@ -1084,6 +1098,47 @@ class SessionRunner:
                     self._timeout_interrupt_settled = None
                     self._timeout_interrupt_delivered = False
 
+    async def _discard_abandoned_turn(self) -> None:
+        """Consume an abandoned predecessor's leftover output before querying.
+
+        The predecessor was interrupted when it was abandoned, so the CLI ends it
+        with a terminal ResultMessage that nobody read. Everything up to and
+        including that result belongs to the old turn and is discarded here
+        (the turn lock is held, so no consumer can see it). If the CLI never
+        produces that result, the model session is replaced: waiting longer
+        would stall every later turn, and reading on would reattribute the old
+        turn's output to this one.
+        """
+
+        assert self._session is not None
+        discarded = 0
+        resynced = False
+        with contextlib.suppress(Exception), anyio.move_on_after(
+            _ABANDONED_TURN_DRAIN_TIMEOUT_S
+        ):
+            async for message in self._session.receive_turn():
+                discarded += 1
+                if isinstance(message, ResultMessage):
+                    resynced = True
+                    break
+        if resynced:
+            logger.warning(
+                "discarded abandoned turn output session=%s messages=%d",
+                self._session_id,
+                discarded,
+            )
+        else:
+            logger.warning(
+                "abandoned turn never ended; recycling model session session=%s messages=%d",
+                self._session_id,
+                discarded,
+            )
+            with contextlib.suppress(Exception):
+                await self._session.close()
+            self._session = self._factory()
+            await self._session.connect()
+        self._result_pending = False
+
     def _metric_outcome(self, tracker: BudgetTracker) -> str:
         if self._timeout_requested:
             return "classified_failure"
@@ -1122,8 +1177,13 @@ class SessionRunner:
         gen.query_observed()
         # The prompt text never reaches OTel (e2e ladder gate); record its size only.
         gen.observe_prompt(event.text)
+        if self._result_pending:
+            await self._discard_abandoned_turn()
+        self._result_pending = True
         await self._session.query(event.text)
         async for message in self._session.receive_turn():
+            if isinstance(message, ResultMessage):
+                self._result_pending = False
             if isinstance(message, StreamedToolUseBoundary):
                 gen.record_first_response_boundary()
                 gen.streamed_tool_use(
@@ -1315,7 +1375,9 @@ class SessionRunner:
 
         # The turn iterator ended without a terminal result (e.g. an interrupt
         # aborted before the model produced one). Emit a final so the stream
-        # always terminates in a final event.
+        # always terminates in a final event. The iterator ran to its own end,
+        # so nothing from this turn is left queued for the next one (#3425).
+        self._result_pending = False
         if self._timeout_requested:
             status = SessionStatus.CLASSIFIED_FAILURE
         elif self._interrupt_requested:
