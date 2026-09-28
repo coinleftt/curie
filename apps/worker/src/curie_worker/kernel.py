@@ -529,6 +529,12 @@ _ESCALATION_CAUSES = {
     "runner-timeout-unconfirmed": "runner_timeout",
     "workspace-error": "workspace_error",
     "history-persistence-error": "history_capacity",
+    # #3401: max-turns and an unclassified runner failure used to collapse into
+    # runner_escalated, so a consumer that only read the terminus cause could
+    # not tell them apart. Each keeps its own cause. Anything still unnamed
+    # stays runner_escalated.
+    "max-turns": "max_turns",
+    "unclassified": "unclassified",
 }
 
 
@@ -626,6 +632,41 @@ def _with_guidance(
     else:
         guidance = _CLASSIFICATION_GUIDANCE.get(token)
     return f"{lead} {guidance}" if guidance else lead
+
+
+# First line of a failed turn's delivered reply (#3401). Frozen with the CLI
+# reader in tests/vectors/turn-failure-reply.json. One token, no spaces, so a
+# model sentence cannot satisfy the parser by mentioning the prefix.
+TURN_FAILURE_REPLY_PREFIX = "curie-turn-failure:"
+
+
+def failure_class_from_reply(text: str) -> str | None:
+    """The failure class on a delivered reply, or None when it is not a failure.
+
+    Only a first line of ``curie-turn-failure: <token>`` counts. A later mention,
+    or a token that contains whitespace, is model text and is not a failure.
+    """
+
+    if not text or not text.strip():
+        return None
+    line = text.lstrip("\n").splitlines()[0].strip()
+    if not line.startswith(TURN_FAILURE_REPLY_PREFIX):
+        return None
+    token = line[len(TURN_FAILURE_REPLY_PREFIX) :].strip()
+    if not token or any(char.isspace() for char in token):
+        return None
+    return token
+
+
+def turn_failure_reply(failure_class: str, message: str) -> str:
+    """Prefix ``message`` so a text-only consumer can see the failed turn."""
+
+    if failure_class_from_reply(f"{TURN_FAILURE_REPLY_PREFIX} {failure_class}") != failure_class:
+        raise ValueError("failure class must be one token")
+    body = message.strip()
+    if not body:
+        return f"{TURN_FAILURE_REPLY_PREFIX} {failure_class}"
+    return f"{TURN_FAILURE_REPLY_PREFIX} {failure_class}\n\n{body}"
 
 
 def _escalation_text(
@@ -2321,6 +2362,7 @@ class Kernel:
                     route,
                     "A prior attempt started an action before the worker restarted; "
                     "not retrying automatically. Flagging for a human.",
+                    failure_class="prior-side-effect",
                 )
                 await self._complete(
                     qevent,
@@ -2670,6 +2712,7 @@ class Kernel:
                             "The run exceeded its delivery deadline after "
                             f"{attempt - 1} attempt(s) and was not restarted. "
                             "Flagging for a human.",
+                            failure_class="delivery-deadline",
                         )
                         await self._complete(
                             qevent,
@@ -2806,6 +2849,7 @@ class Kernel:
                             ),
                             detail=outcome.error_message,
                         ),
+                        failure_class=token,
                     )
                     await self._complete(
                         qevent,
@@ -2831,6 +2875,7 @@ class Kernel:
                         "The run exceeded its delivery deadline after "
                         f"{attempt} attempt(s) and was not restarted. "
                         "Flagging for a human.",
+                        failure_class="delivery-deadline",
                     )
                     await self._complete(
                         qevent,
@@ -2858,6 +2903,7 @@ class Kernel:
                             ),
                             detail=outcome.error_message,
                         ),
+                        failure_class=token,
                     )
                     await self._complete(
                         qevent,
@@ -6640,6 +6686,7 @@ class Kernel:
                     "route is not bound to a valid resolution target for this "
                     "agent; flagging for a human instead of widening the request "
                     "to this channel.",
+                    failure_class="approval-route-unbound",
                 )
                 return False
             (card_kind, card_channel), notification_target = targets
@@ -6650,6 +6697,7 @@ class Kernel:
                 route,
                 "The run requested an approval, but no approval backend is "
                 "configured on this worker; flagging for a human instead of pausing.",
+                failure_class="approval-backend-missing",
             )
             return False
 
@@ -6659,6 +6707,7 @@ class Kernel:
                 route,
                 "Repository publication is unavailable on this installation; nothing was "
                 "published and no approval was created.",
+                failure_class="publication-unavailable",
             )
             return False
 
@@ -6820,6 +6869,7 @@ class Kernel:
                 route,
                 "The run requested an approval, but the approval record could "
                 "not be created; flagging for a human instead of pausing.",
+                failure_class="approval-create-failed",
             )
             return False
 
@@ -7515,9 +7565,19 @@ class Kernel:
         qevent: QueuedTurn,
         route: TargetRoute,
         message: str,
+        *,
+        failure_class: str,
     ) -> None:
-        logger.warning("escalating event %s: %s", qevent.event_id, message)
-        await self._reply_for(qevent, route, message)
+        """Deliver ``message`` as a failed turn, with the class on the first line.
+
+        The class marker is what a consumer that sees only the reply text uses
+        to tell this from a successful task reply (#3401). Factory executions
+        still skip the channel write; their status comment carries the class.
+        """
+
+        text = turn_failure_reply(failure_class, message)
+        logger.warning("escalating event %s: %s", qevent.event_id, text)
+        await self._reply_for(qevent, route, text)
 
     def _backoff(self, attempt: int) -> float:
         raw: float = self._config.retry_backoff_base_s * (2 ** (attempt - 1))

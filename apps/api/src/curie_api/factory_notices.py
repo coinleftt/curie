@@ -100,6 +100,14 @@ _CAUSE_TEXT = {
         "Inspect the result and retry."
     ),
     "runner_escalated": "the run stopped on an error and was handed to a person.",
+    "unclassified": (
+        "the run failed and Curie could not name a more specific cause. "
+        "Read the worker log for the provider message, then retry or hand it to a person."
+    ),
+    "max_turns": (
+        "the run used its whole turn budget. Raise worker.workItemMaxTurns "
+        "(CURIE_WORK_ITEM_MAX_TURNS) to allow more turns, then retry."
+    ),
     "runner_failed": "the run ended without a result.",
     "approval_create_failed": (
         "the requested approval could not be created. Check the publication "
@@ -138,6 +146,34 @@ _CI_DETAIL_CAUSES = frozenset({"ci_failed", "ci_timeout", "ci_unverified"})
 # A run that ended without publishing carries the agent's own last message
 # (#3128). That text is model-authored, so it renders inert inside a code fence.
 _AGENT_MESSAGE_CAUSES = frozenset({"early_stop", "no_pull_request"})
+# Wire classification a text-only consumer reads off the status comment (#3401).
+# Same tokens as the channel reply's ``curie-turn-failure:`` line. Causes with
+# no entry stay unlabeled rather than inventing a class.
+# Failed runs that still need a person, including the classes that used to
+# collapse into runner_escalated (#3401). The status card reads this set.
+NEEDS_HUMAN_CAUSES = frozenset(
+    {"runner_escalated", "unclassified", "max_turns", "ci_failed"}
+)
+
+
+def needs_human(status: str, terminal: str | None) -> bool:
+    """Whether a failed run should show the needs-human card state."""
+
+    return status == "failed" and terminal in NEEDS_HUMAN_CAUSES
+
+
+_FAILURE_CLASS_BY_CAUSE = {
+    "unclassified": "unclassified",
+    "max_turns": "max-turns",
+    "history_capacity": "history-persistence-error",
+    "model_credit_exhausted": "model-credit-exhausted",
+    "model_credential_rejected": "model-credential-rejected",
+    "model_rate_limited": "rate-limit",
+    "model_error": "server-error",
+    "budget_exceeded": "budget-exceeded",
+    "runner_timeout": "runner-timeout",
+    "workspace_error": "workspace-error",
+}
 _BACKTICK_RUN = re.compile(r"`+")
 
 
@@ -237,6 +273,9 @@ def result_section(
             label = "Details" if cause in _CI_DETAIL_CAUSES else "Provider message"
             text += f"{label}: {detail.strip()}\n"
         text += f"Cause: {cause}\n"
+        failure_class = _FAILURE_CLASS_BY_CAUSE.get(cause)
+        if failure_class is not None:
+            text += f"Failure class: {failure_class}\n"
     if feedback_url is not None:
         text += f"In response to {feedback_url}\n"
     return text
