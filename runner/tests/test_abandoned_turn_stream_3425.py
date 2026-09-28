@@ -174,29 +174,69 @@ async def test_turn_after_abandoned_turn_answers_its_own_prompt() -> None:
 
 
 @pytest.mark.anyio
-async def test_wedged_interrupt_recycles_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A CLI that never answers the stop is replaced, not waited on forever."""
+async def test_unfinished_abandoned_turn_fails_next_turn_without_querying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A still-running old turn fails the new one; it never answers late.
+
+    The session is kept (no recycle), so the conversation accumulated in this
+    process survives, and the turn after the old one finally ends is correct.
+    """
 
     monkeypatch.setattr(session_module, "_ABANDONED_TURN_DRAIN_TIMEOUT_S", 0.05)
-    wedged = _SharedQueueSession(interrupt_emits_result=False)
-    fresh = _SharedQueueSession()
-    sessions = iter([wedged, fresh])
-    runner = SessionRunner(
-        session_factory=lambda: next(sessions),
-        ceiling=0,
-        tracer=RunTracer(None),
-        classifier=SideEffectClassifier(),
-        trace_name="t",
-    )
+    session = _SharedQueueSession(interrupt_emits_result=False)
+    calls: list[int] = []
+    runner = _runner(session, calls)
     await runner.start()
 
     await _abandon_mid_tool(runner)
 
     second = await _final(runner, "second")
-    assert wedged.closed
+    assert second.status is SessionStatus.CLASSIFIED_FAILURE
+    assert session.queries == ["slow"]
+    assert not session.closed
+    assert calls == [1]
+
+    # The old turn's tool finally returns and the CLI ends that turn.
+    session._put(_reply("DONE"))
+    session._put(_result("DONE"))
+
+    third = await _final(runner, "third")
+    assert third.status is SessionStatus.DONE
+    assert third.text == "answer to third"
+    assert session.queries == ["slow", "third"]
+
+
+@pytest.mark.anyio
+async def test_steer_is_refused_while_the_old_turn_drains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing may be queued ahead of the new turn's own prompt during a drain."""
+
+    session = _SharedQueueSession(interrupt_emits_result=False)
+    runner = _runner(session)
+    await runner.start()
+    await _abandon_mid_tool(runner)
+
+    steer_results: list[bool] = []
+
+    async def steer_then_finish_old_turn() -> None:
+        # The drain is waiting on the old turn's result: the new turn is open
+        # but must not accept a steer yet.
+        with anyio.fail_after(5):
+            while not runner._turn_open:
+                await anyio.sleep(0.001)
+        steer_results.append(await runner.steer("steered"))
+        session._put(_result("DONE"))
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(steer_then_finish_old_turn)
+        second = await _final(runner, "second")
+
+    assert steer_results == [False]
+    assert "steered" not in session.queries
     assert second.status is SessionStatus.DONE
     assert second.text == "answer to second"
-    assert fresh.queries == ["second"]
 
 
 @pytest.mark.anyio
