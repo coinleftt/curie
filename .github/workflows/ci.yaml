@@ -1632,6 +1632,7 @@ jobs:
       local_release: ${{ steps.filter.outputs.local_release }}
       cluster: ${{ steps.filter.outputs.cluster }}
       released_upgrade: ${{ steps.filter.outputs.released_upgrade }}
+      released_upgrade_full: ${{ steps.filter.outputs.released_upgrade_full }}
       skill_local_tiers: ${{ steps.filter.outputs.skill_local_tiers }}
       images: ${{ steps.filter.outputs.images }}
       cli_release: ${{ steps.filter.outputs.cli_release }}
@@ -2001,7 +2002,7 @@ jobs:
     name: E2E released chart upgrade (released install to candidate)
     runs-on: ubuntu-latest
     needs: [rust-build, changes, ci-images]
-    if: ${{ needs.changes.outputs.released_upgrade == 'true' }}
+    if: ${{ needs.changes.outputs.released_upgrade_full == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -2380,7 +2381,7 @@ jobs:
     name: E2E released chart upgrade negative control (nil unsafe helpers)
     runs-on: ubuntu-latest
     needs: [rust-build, changes, ci-images]
-    if: ${{ needs.changes.outputs.released_upgrade == 'true' }}
+    if: ${{ needs.changes.outputs.released_upgrade_full == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -2523,10 +2524,17 @@ jobs:
   # The upgrade matrix is sharded (issue #2733) and change-selected with
   # released-upgrade. Unrelated CLI, docs, and UI PRs must not occupy 14 kind
   # runners. The shard lister stays on every PR so coverage cannot drift.
+  #
+  # A pull request that selects released-upgrade runs only the smoke shard,
+  # s01: no failure injection, and it covers a fresh install, the N-1 to N
+  # upgrade with state, a same-version upgrade, and the soak refusal. Pushes
+  # to main and dispatches (the nightly kind run on next) run every shard,
+  # plus the released chart upgrade jobs above.
   e2e-cluster-upgrade-matrix-shards:
     name: E2E cluster upgrade matrix shards
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: [changes]
     outputs:
       shards: ${{ steps.list.outputs.shards }}
     steps:
@@ -2537,6 +2545,9 @@ jobs:
         run: bash cli/scripts/cluster-upgrade-matrix.sh --self-test
       - name: List upgrade matrix shards
         id: list
+        env:
+          FULL: ${{ needs.changes.outputs.released_upgrade_full }}
+          SMOKE_SHARD: s01
         run: |
           set -euo pipefail
           shards="$(bash cli/scripts/cluster-upgrade-matrix.sh --list-shards --json \
@@ -2544,6 +2555,13 @@ jobs:
           if [[ -z "$shards" || "$shards" == "[]" ]]; then
             echo "cluster-upgrade-matrix.sh listed no shards" >&2
             exit 1
+          fi
+          if [[ "$FULL" != "true" ]]; then
+            shards="$(SHARDS="$shards" python3 -c 'import json, os, sys
+          smoke = os.environ["SMOKE_SHARD"]
+          if smoke not in json.loads(os.environ["SHARDS"]):
+              sys.exit(f"smoke shard {smoke} is not a listed shard")
+          print(json.dumps([smoke]))')"
           fi
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
 
@@ -2555,10 +2573,9 @@ jobs:
     if: ${{ needs.changes.outputs.released_upgrade == 'true' }}
     strategy:
       fail-fast: false
-      # Two waves for 14 shards. Four ran four waves, 57 minutes on run
-      # 36204726414, past #2733's 45 minute ceiling, while other jobs across
-      # 35 runs never queued more than 40 seconds for a runner.
-      max-parallel: 7
+      # One wave for 14 shards. Seven ran two waves, and shards waited 9.3
+      # minutes on average for the second. Pull requests run one shard.
+      max-parallel: 14
       matrix:
         shard: ${{ fromJSON(needs.e2e-cluster-upgrade-matrix-shards.outputs.shards) }}
     steps:
@@ -2701,6 +2718,7 @@ jobs:
           LOCAL_RELEASE_SELECTED: ${{ needs.changes.outputs.local_release }}
           CLUSTER_SELECTED: ${{ needs.changes.outputs.cluster }}
           RELEASED_UPGRADE_SELECTED: ${{ needs.changes.outputs.released_upgrade }}
+          RELEASED_UPGRADE_FULL: ${{ needs.changes.outputs.released_upgrade_full }}
           SKILL_LOCAL_RESULT: ${{ needs.e2e-ladder.result }}
           LOCAL_RELEASE_RESULT: ${{ needs.e2e-ladder-release.result }}
           CLUSTER_RESULT: ${{ needs.e2e-ladder-cluster.result }}
@@ -2729,7 +2747,9 @@ jobs:
                 ( "$LOCAL_SELECTED" != "true" && "$LOCAL_SELECTED" != "false" ) ||
                 ( "$LOCAL_RELEASE_SELECTED" != "true" && "$LOCAL_RELEASE_SELECTED" != "false" ) ||
                 ( "$CLUSTER_SELECTED" != "true" && "$CLUSTER_SELECTED" != "false" ) ||
-                ( "$RELEASED_UPGRADE_SELECTED" != "true" && "$RELEASED_UPGRADE_SELECTED" != "false" ) ]]; then
+                ( "$RELEASED_UPGRADE_SELECTED" != "true" && "$RELEASED_UPGRADE_SELECTED" != "false" ) ||
+                ( "$RELEASED_UPGRADE_FULL" != "true" && "$RELEASED_UPGRADE_FULL" != "false" ) ||
+                ( "$RELEASED_UPGRADE_FULL" == "true" && "$RELEASED_UPGRADE_SELECTED" != "true" ) ]]; then
             echo "E2E required failed" >&2
             exit 1
           fi
@@ -2746,13 +2766,18 @@ jobs:
           if [[ "$CLUSTER_SELECTED" == "true" ]]; then
             cluster_expected="success"
           fi
+          # The released chart upgrade jobs run only on the full runs (push
+          # and dispatch). The matrix runs whenever released-upgrade is
+          # selected, one smoke shard on a pull request: a matrix job reports
+          # success only when every selected shard succeeded.
           released_upgrade_expected="skipped"
-          if [[ "$RELEASED_UPGRADE_SELECTED" == "true" ]]; then
+          if [[ "$RELEASED_UPGRADE_FULL" == "true" ]]; then
             released_upgrade_expected="success"
           fi
-          # Same selector as released-upgrade: a matrix job reports success
-          # only when every selected shard succeeded, and skipped otherwise.
-          upgrade_matrix_expected="$released_upgrade_expected"
+          upgrade_matrix_expected="skipped"
+          if [[ "$RELEASED_UPGRADE_SELECTED" == "true" ]]; then
+            upgrade_matrix_expected="success"
+          fi
 
           if ! validate_selected_outcomes; then
             echo "E2E required failed" >&2
