@@ -3136,9 +3136,9 @@ def test_max_turns_escalates_once_naming_the_turn_budget_knob(make_harness) -> N
             assert "(unclassified)" not in text
             assert "max-turns" in text
             assert "turn budget" in text.lower()
-            assert (
-                "CURIE_WORK_ITEM_MAX_TURNS" in text or "worker.workItemMaxTurns" in text
-            ), text
+            # #3403: a chat turn ran under the runner's own cap.
+            assert "CURIE_MAX_TURNS" in text, text
+            assert "CURIE_WORK_ITEM_MAX_TURNS" not in text, text
 
     asyncio.run(go())
 
