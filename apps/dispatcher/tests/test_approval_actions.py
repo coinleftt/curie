@@ -232,6 +232,7 @@ def test_reject_button_resolves_with_rejected_decision(
 def test_two_releases_oneshot_non_owner_then_owner_resolves_an_immediate_action(
     redis_client: redis.Redis,
     config: DispatcherConfig,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """One delivery to the non-owner, then one to the owner. No retry loop (#2307)."""
 
@@ -262,6 +263,9 @@ def test_two_releases_oneshot_non_owner_then_owner_resolves_an_immediate_action(
     owner_web.chat_update.assert_called_once()
     assert "Approved by <@U_MANAGER>" in owner_web.chat_update.call_args.kwargs["text"]
     owner_web.chat_postEphemeral.assert_not_called()
+    assert any(
+        "may be owned by another Curie release" in record.getMessage() for record in caplog.records
+    )
 
 
 def test_two_releases_oneshot_non_owner_then_owner_opens_a_note_dialog(
@@ -331,6 +335,8 @@ def test_two_releases_oneshot_non_owner_then_owner_resolves_a_note_submission(
     deliver_once(owner_handler, owner_socket, owner_app, submit)
 
     assert owner_socket.acked_envelope_ids == ["env-oneshot-note-submit"]
+    assert owner_socket.ack_payload_for("env-oneshot-note-submit") is None
+    non_owner_web.conversations_replies.assert_not_called()
     assert len(non_owner.calls) == 1
     assert len(owner.calls) == 1
     assert owner.calls[0]["note"] == "approved for Q3"
