@@ -9,15 +9,26 @@ PEL row to another consumer must do neither, and must not ack.
 from __future__ import annotations
 
 import asyncio
+import functools
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
-from aci_protocol import QueuedTurn, ReplyHandle
+from aci_protocol import QueuedTurn
 from curie_dispatcher.queue import to_stream_fields
 from curie_worker.consumer import Consumer
 from curie_worker.delivery_lease import DeliveryLease, DeliveryLeaseStore
 
 from .conftest import _pending_rows
+
+# importlib import mode does not add the test root to sys.path.
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from queue_fixtures import qevent  # noqa: E402
+from queue_fixtures import wait_until as _wait_until  # noqa: E402
+
+_qevent = functools.partial(qevent, event_id="notice-1")
 
 # TTL (1.0) is at least 3x the heartbeat (0.2). Reclaim interval (0.5) stays
 # strictly under the TTL. The runner ceiling and budget stay at their defaults,
@@ -27,23 +38,6 @@ _LEASE_KNOBS: dict[str, object] = {
     "delivery_lease_ttl_s": 1.0,
     "reclaim_interval_s": 0.5,
 }
-
-
-def _qevent(
-    text: str,
-    *,
-    thread: str = "th-1",
-    event_id: str = "notice-1",
-    placeholder: str | None = "p-1",
-) -> QueuedTurn:
-    return QueuedTurn(
-        event_id=event_id,
-        conversation_id=thread,
-        author="U1",
-        text=text,
-        reply_handle=ReplyHandle(kind="slack", channel="C1", placeholder=placeholder),
-        received_at="2026-07-05T00:00:00+00:00",
-    )
 
 
 def _stall(kernel: Any) -> tuple[asyncio.Event, asyncio.Event, dict[str, DeliveryLease]]:
@@ -93,15 +87,6 @@ async def _wait_vanished(
             return found
         await asyncio.sleep(0.05)
     return found
-
-
-async def _wait_until(pred: Any, *, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if pred():
-            return
-        await asyncio.sleep(0.01)
-    raise AssertionError("condition not met within timeout")
 
 
 async def _deliver(h: Any, consumer: Consumer, qevent: QueuedTurn) -> tuple[str, dict[str, str]]:
