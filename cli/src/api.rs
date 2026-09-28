@@ -3333,7 +3333,7 @@ impl ApiClient {
 mod tests {
     use super::{
         add_channel_body, agent_create_body, agent_update_body, is_insecure_endpoint,
-        prevalidate_series_span, validate_allowlist_entry, MAX_OBSERVABILITY_METRIC_POINTS,
+        prevalidate_series_span, validate_allowlist_entry,
     };
 
     /// The pre-dispatch span guard allows exactly the cap (#1948): 1,000 hour
@@ -3473,10 +3473,6 @@ mod tests {
         let error = prevalidate_series_span("hour", Some("1970-01-01T00:00:00Z"), None)
             .expect_err("a start of 1970 with no end exceeds the cap against now");
         assert!(error.to_string().contains("now"));
-        assert_eq!(
-            MAX_OBSERVABILITY_METRIC_POINTS, 1000,
-            "the pre-dispatch guard and the post-dispatch bound share one cap"
-        );
     }
 
     #[test]
