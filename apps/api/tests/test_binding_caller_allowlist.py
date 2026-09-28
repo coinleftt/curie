@@ -45,6 +45,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 ALEMBIC_DIR = Path(__file__).resolve().parents[1] / "alembic"
+REFUSAL_VECTOR = (
+    Path(__file__).resolve().parents[3] / "tests" / "vectors" / "channel-port-refusal.json"
+)
 EMAIL_ENDPOINT = "http://curie-mail-adapter:8080/"
 EMAIL_ADAPTER = "agentmail-sandbox"
 INBOX = "assistant@example.test"
@@ -582,6 +585,8 @@ def test_an_unlisted_author_is_refused_before_any_claim_or_queue_write(
         )
     assert refused.status_code == 403, refused.text
     assert STRANGER not in refused.text
+    # The machine-readable marker an adapter settles on, and nothing else does.
+    assert refused.json() == {"detail": _refusal_vector()["detail"]}
     # Nothing was queued and nothing was claimed: a later listed retry of the
     # same delivery is not blocked by a receipt the refusal left behind.
     assert valkey.xlen(runs_stream) == 0
@@ -704,7 +709,7 @@ def test_admission_answers_for_the_slack_dispatcher(
     agent_id = _slack_agent(client, auth_headers)
     open_answer = _ask(client, auth_headers, [OTHER_USER])
     assert open_answer.status_code == 200, open_answer.text
-    assert open_answer.json() == {"allowed": True, "restricted": False}
+    assert open_answer.json() == {"allowed": True, "restricted": False, "install_restricted": False}
 
     assert (
         _set_callers(
@@ -717,13 +722,14 @@ def test_admission_answers_for_the_slack_dispatcher(
         ).status_code
         == 200
     )
-    with caplog.at_level(logging.INFO, logger="curie_api.routers.channels"):
+    with caplog.at_level(logging.DEBUG, logger="curie_api.routers.channels"):
         refused = _ask(client, auth_headers, [OTHER_USER])
-    assert refused.json() == {"allowed": False, "restricted": True}
+    assert refused.json() == {"allowed": False, "restricted": True, "install_restricted": True}
     assert any("reason=caller_not_allowed" in r.getMessage() for r in caplog.records)
     assert _ask(client, auth_headers, [LISTED_USER]).json() == {
         "allowed": True,
         "restricted": True,
+        "install_restricted": True,
     }
     # A bot-sent message is asked with the sender AND the bot id; either admits.
     assert _ask(client, auth_headers, [OTHER_USER, BOT]).json()["allowed"] is True
@@ -736,7 +742,7 @@ def test_admission_on_an_unbound_route_is_open(
 ) -> None:
     answer = _ask(client, auth_headers, [OTHER_USER], address="C0EXAMPLE9")
     assert answer.status_code == 200, answer.text
-    assert answer.json() == {"allowed": True, "restricted": False}
+    assert answer.json() == {"allowed": True, "restricted": False, "install_restricted": False}
 
 
 def test_admission_takes_the_platform_key_and_nothing_else(
@@ -759,3 +765,97 @@ def test_admission_validates_the_route_and_bounds_the_ids(
     assert _ask(client, auth_headers, [OTHER_USER] * 11).status_code == 422
     assert _ask(client, auth_headers, ["U" * 257]).status_code == 422
     assert _ask(client, auth_headers, [OTHER_USER], unexpected=True).status_code == 422
+
+
+# --- the refusal marker, the install-wide signal, and the review nits ----------
+
+
+def _refusal_vector() -> dict[str, Any]:
+    vector = json.loads(REFUSAL_VECTOR.read_text())
+    assert set(vector) == {"comment", "status", "detail"}, "unknown key in the frozen vector"
+    return dict(vector)
+
+
+def test_the_refusal_marker_matches_the_frozen_vector(
+    channels_client: TestClient, auth_headers: dict[str, str], clean_db: None
+) -> None:
+    """The mail adapter settles only on this exact body, so the API side is
+    pinned to the same frozen literal (tests/vectors/channel-port-refusal.json)."""
+
+    vector = _refusal_vector()
+    agent_id = _email_agent(channels_client, auth_headers)
+    _set_callers(
+        channels_client, auth_headers, agent_id, kind="email", address=INBOX, callers=[LISTED]
+    )
+    refused = channels_client.post("/channels/turns", json=_turn(STRANGER), headers=auth_headers)
+    assert refused.status_code == vector["status"]
+    assert refused.json() == {"detail": vector["detail"]}
+
+
+def test_other_403s_on_the_channel_port_do_not_carry_the_marker(
+    channels_client: TestClient, auth_headers: dict[str, str], clean_db: None
+) -> None:
+    """The marker means exactly "caller refused": no other refusal on the
+    route carries it, so an adapter cannot settle mail on some other 403."""
+
+    _email_agent(channels_client, auth_headers)
+    unauthenticated = channels_client.post("/channels/turns", json=_turn(LISTED))
+    assert unauthenticated.status_code == 401
+    assert _refusal_vector()["detail"] not in unauthenticated.text
+
+
+def test_admission_says_whether_any_binding_on_the_install_carries_a_list(
+    client: TestClient, auth_headers: dict[str, str], clean_db: None
+) -> None:
+    """The install-wide half of the answer: the dispatcher may admit a cold
+    miss during an outage only when its last answer said no list exists at all."""
+
+    _slack_agent(client, auth_headers)
+    email_agent = _email_agent(client, auth_headers)
+    before = _ask(client, auth_headers, [OTHER_USER]).json()
+    assert before == {"allowed": True, "restricted": False, "install_restricted": False}
+
+    _set_callers(
+        client, auth_headers, email_agent, kind="email", address=INBOX, callers=[LISTED]
+    )
+    # The Slack route itself is still open; only the install-wide bit moved.
+    after = _ask(client, auth_headers, [OTHER_USER]).json()
+    assert after == {"allowed": True, "restricted": False, "install_restricted": True}
+
+    _set_callers(client, auth_headers, email_agent, kind="email", address=INBOX, callers=None)
+    cleared = _ask(client, auth_headers, [OTHER_USER]).json()
+    assert cleared["install_restricted"] is False
+
+
+def test_admission_refusals_log_at_debug_not_info(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    clean_db: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A busy shared channel where most people are not listed would otherwise
+    write one INFO line per new caller; the dispatcher's metric still counts."""
+
+    agent_id = _slack_agent(client, auth_headers)
+    _set_callers(
+        client, auth_headers, agent_id, kind="slack", address=SLACK_CHANNEL, callers=[LISTED_USER]
+    )
+    with caplog.at_level(logging.DEBUG, logger="curie_api.routers.channels"):
+        assert _ask(client, auth_headers, [OTHER_USER]).json()["allowed"] is False
+    refusals = [r for r in caplog.records if "caller refused" in r.getMessage()]
+    assert [r.levelno for r in refusals] == [logging.DEBUG]
+
+
+def test_a_refused_list_is_echoed_as_the_422_input(
+    client: TestClient, auth_headers: dict[str, str], clean_db: None
+) -> None:
+    """Match FastAPI's other body errors, which carry the value they refused."""
+
+    agent_id = _email_agent(client, auth_headers)
+    resp = _set_callers(
+        client, auth_headers, agent_id, kind="email", address=INBOX, callers=["not an address"]
+    )
+    assert resp.status_code == 422, resp.text
+    (error,) = resp.json()["detail"]
+    assert error["loc"] == ["body", "allowed_callers"]
+    assert error["input"] == ["not an address"]

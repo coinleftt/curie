@@ -109,10 +109,19 @@ _CLAIM_PREFIX = "curie:channel"
 
 # The 403 a refused caller earns at the channel port (ADR 0175 decision 2). The
 # adapter has already proved it speaks for this binding, so saying "refused"
-# reveals nothing it did not know; the detail still names no list entry and no
-# message content. Every adapter treats the 403 as final and settles the
-# delivery without a turn (`docs/interfaces/port-adapter-service/INTERFACE.md`).
-_CALLER_REFUSED_DETAIL = "this binding does not admit the turn's author"
+# reveals nothing it did not know; the detail names no list entry and no
+# message content.
+#
+# The detail is a stable machine-readable CODE, not a sentence, because it is
+# the one thing an adapter settles on: a 403 carrying exactly this detail is
+# final, and any other 403 (a proxy, a firewall, a future authorization check
+# on this route) stays retryable, so infrastructure in front of the API can
+# never make an adapter drop mail for good. A body code rather than a header,
+# because the refusal and its marker then travel as one JSON document that no
+# intermediary adds on its own, and a proxy that rewrites the body fails safe
+# (the adapter retries). Frozen with the mail adapter's reader in
+# `tests/vectors/channel-port-refusal.json`.
+CALLER_NOT_ALLOWED_DETAIL = "caller_not_allowed"
 
 # The bound on how many ids one admission question may carry. The dispatcher
 # sends at most two (a sender plus the bot id that posted as it); the headroom
@@ -205,6 +214,11 @@ class AdmissionOut(BaseModel):
 
     allowed: bool
     restricted: bool
+    # Whether ANY binding on this install carries a list. The dispatcher
+    # remembers it for the same stale window as every other answer, so a cold
+    # miss during an outage on an install with no list anywhere is admitted:
+    # a list that does not exist cannot refuse anyone.
+    install_restricted: bool
 
 
 class TurnAccepted(BaseModel):
@@ -449,7 +463,13 @@ def _authorize(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail=_AUTH_DETAIL)
 
 
-def _record_refusal(row: AgentChannel, decision: AdmissionDecision, *, surface: str) -> None:
+def _record_refusal(
+    row: AgentChannel,
+    decision: AdmissionDecision,
+    *,
+    surface: str,
+    level: int = logging.INFO,
+) -> None:
     """Log one refused caller: the binding and the reason, never the message.
 
     The log line is what an operator greps when a listed person reports the bot
@@ -461,9 +481,14 @@ def _record_refusal(row: AgentChannel, decision: AdmissionDecision, *, surface: 
         row: the binding the caller was refused on.
         decision: the refusal `admit` returned.
         surface: which endpoint refused, for the log line.
+        level: the log level. The channel port logs at INFO, one line per
+            refused delivery. The admission question logs at DEBUG: in a busy
+            shared channel most callers may be unlisted, and the dispatcher's
+            `curie.turn.refused` counter already counts every refusal.
     """
 
-    logger.info(
+    logger.log(
+        level,
         "caller refused surface=%s binding=%s kind=%s reason=%s",
         surface,
         row.id,
@@ -586,7 +611,7 @@ async def ingest_turn(
             "curie.turn.refused",
             attributes={"service.name": "curie-api", "reason": decision.reason.value},
         )
-        raise HTTPException(status.HTTP_403_FORBIDDEN, _CALLER_REFUSED_DETAIL)
+        raise HTTPException(status.HTTP_403_FORBIDDEN, CALLER_NOT_ALLOWED_DETAIL)
 
     # One hash of the `delivery_id`, shared by the two names derived from it.
     digest = sha16(body.delivery_id)
@@ -767,5 +792,10 @@ async def check_admission(data: AdmissionIn, session: SessionDep) -> AdmissionOu
         # The dispatcher counts its own refusal (`curie.turn.refused` with
         # service curie-dispatcher); counting it here too would double every
         # Slack refusal, so this side only logs the binding and reason.
-        _record_refusal(row, decision, surface="admission")
-    return AdmissionOut(allowed=decision.allowed, restricted=decision.restricted)
+        _record_refusal(row, decision, surface="admission", level=logging.DEBUG)
+    install_restricted = decision.restricted or await crud.any_binding_restricted(session)
+    return AdmissionOut(
+        allowed=decision.allowed,
+        restricted=decision.restricted,
+        install_restricted=install_restricted,
+    )

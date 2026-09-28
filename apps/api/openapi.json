@@ -791,6 +791,10 @@
             "title": "Allowed",
             "type": "boolean"
           },
+          "install_restricted": {
+            "title": "Install Restricted",
+            "type": "boolean"
+          },
           "restricted": {
             "title": "Restricted",
             "type": "boolean"
@@ -798,7 +802,8 @@
         },
         "required": [
           "allowed",
-          "restricted"
+          "restricted",
+          "install_restricted"
         ],
         "title": "AdmissionOut",
         "type": "object"
