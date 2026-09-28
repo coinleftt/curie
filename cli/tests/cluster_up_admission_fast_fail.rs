@@ -1,8 +1,10 @@
 //! Binary regression contract for fast, ownership-checked admission failures
 //! during `curie cluster up` (#3354).
 
+#[path = "support/executable.rs"]
+mod test_executable;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -20,7 +22,7 @@ fn chart() -> &'static str {
     concat!(env!("CARGO_MANIFEST_DIR"), "/../charts/curie")
 }
 
-fn write_exec(dir: &Path, name: &str, body: &str) {
+fn install_converged_stub(dir: &Path, name: &str, body: &str) {
     let body = if matches!(name, "helm" | "kubectl") {
         format!(
             "#!/bin/sh\n{}\n{}",
@@ -30,14 +32,7 @@ fn write_exec(dir: &Path, name: &str, body: &str) {
     } else {
         body.to_string()
     };
-    let path = dir.join(name);
-    fs::write(&path, body).unwrap_or_else(|error| panic!("write {name}: {error}"));
-    let mut permissions = fs::metadata(&path)
-        .unwrap_or_else(|error| panic!("read {name} metadata: {error}"))
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&path, permissions)
-        .unwrap_or_else(|error| panic!("make {name} executable: {error}"));
+    test_executable::install_in(dir, name, &body);
 }
 
 struct Fixture {
@@ -65,7 +60,7 @@ impl Fixture {
         let event_log = temp.path().join("event-queries.log");
         let event_snapshot = temp.path().join("event-snapshot-seen");
 
-        write_exec(
+        install_converged_stub(
             &bin_dir,
             "helm",
             r#"#!/bin/sh
@@ -122,7 +117,7 @@ exit 64
 "#,
         );
 
-        write_exec(
+        install_converged_stub(
             &bin_dir,
             "kubectl",
             r#"#!/bin/sh
