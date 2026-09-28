@@ -13,41 +13,31 @@ on:
     branches: [main, next]
     paths:
       - "charts/curie/**"
-      - "examples/sre-bot/observability/**"
+      - "examples/sre-bot/**"
       - ".github/workflows/helm-ci.yaml"
-      # The object-store web-identity gate below EXECUTES these repository
-      # files, so a change to one of them can break the gate without touching
-      # any charts/ path. Without them in this filter, a PR that reverts the
-      # credential fix matches nothing here, the whole helm job is skipped, and
-      # the gate that exists to catch exactly that revert never runs. That is
-      # the difference between a gate and a gate-shaped thing.
-      - "packages/aci-protocol/src/aci_protocol/s3.py"
-      - "apps/api/src/curie_api/config.py"
-      - "apps/api/src/curie_api/storage.py"
-      - "apps/worker/src/curie_worker/config.py"
-      - "apps/worker/src/curie_worker/bundle_store.py"
-      # Same obligation, second gate: the threaded bot allowlist gate (#2437)
-      # executes this file to prove the rendered value survives the REAL
-      # ThreadedBotAdmission parser. Without it here, a PR that reverts or
-      # loosens that model matches nothing in this filter, the helm job is
-      # skipped, and the gate that exists to catch exactly that revert
-      # never runs.
-      - "apps/dispatcher/src/curie_dispatcher/config.py"
+      # The Chart job below is the only CI run of the chart assertion
+      # scripts, and several read or EXECUTE repository code outside charts/: the object-store web-identity and threaded bot allowlist gates
+      # import the real api, worker, and dispatcher config through `uv run`;
+      # upgrade-retained-scalar builds and runs the CLI with cargo against a
+      # Python driver under cli/tests/data; observability-stack and
+      # worker-ttl-bounds cross-check cli/src and cli/scripts; render reads the
+      # generated aci-protocol bindings; security-probe runs scripts/; and the
+      # image-pin gates read the compose files. A PR that breaks one of those
+      # without touching charts/ must still run this workflow, or the gate
+      # that exists to catch it is skipped. Whole trees are listed rather than
+      # single files so a new script reading a new file cannot silently fall
+      # outside the filter.
+      - "cli/**"
+      - "apps/api/**"
+      - "apps/worker/**"
+      - "apps/dispatcher/**"
+      - "packages/**"
+      - "scripts/**"
       - "uv.lock"
       - "pyproject.toml"
-      # The unpinned-image gate (#2319) and the Langfuse image-pin gate
-      # (#2190) both read compose.dev.yaml to check third-party image tags,
-      # so a compose-only edit that unpins one must run this workflow too.
+      - "compose.yaml"
       - "compose.dev.yaml"
-      # Third obligation, and the one this gate exists for (#2741): the
-      # retained-values scalar gate below BUILDS AND EXECUTES the real CLI
-      # against the recorded upgrade boundary, so its subject is Rust and its
-      # driver is a Python stub -- neither of them under charts/. Without these
-      # entries, a PR that reverts the JSON re-serializer and puts the YAML 1.2
-      # emitter back matches nothing in this filter, the helm job is skipped,
-      # and the gate that exists to catch exactly that revert never runs.
-      - "cli/src/ops/upgrade.rs"
-      - "cli/tests/data/upgrade-driver.py"
+      - "compose/**"
 
 permissions:
   contents: read
