@@ -571,6 +571,32 @@ pub fn load_lock(bundle_dir: &Path) -> Result<Option<ConnectorLockFileDecl>> {
     parse_lock(&body).map(Some)
 }
 
+/// The runner Dockerfile a bundle carries by convention.
+pub const RUNNER_DOCKERFILE: &str = "runner.Dockerfile";
+
+/// A warning when the bundle ships a `runner.Dockerfile` that nothing builds
+/// (#3420).
+///
+/// Only a `runner:` declaration makes `curie build` build the layer and a
+/// deploy bind it, so without one the agent silently runs the bare platform
+/// runner and every stdio server the Dockerfile installs is missing.
+pub fn undeclared_runner_dockerfile(
+    bundle_dir: &Path,
+    decl: &ConnectorsFileDecl,
+) -> Option<String> {
+    if decl.runner.is_some() || !bundle_dir.join(RUNNER_DOCKERFILE).is_file() {
+        return None;
+    }
+    Some(format!(
+        "{bundle}/{RUNNER_DOCKERFILE} is never built: {CONNECTORS_FILE} declares no `runner:` \
+         layer, so this agent runs the platform runner without anything that Dockerfile \
+         installs. Declare `runner.build` (context `.`, dockerfile `{RUNNER_DOCKERFILE}`) in \
+         {CONNECTORS_FILE}, then run `curie build --plugin-dir {bundle} --registry <ref>` \
+         before deploying.",
+        bundle = bundle_dir.display(),
+    ))
+}
+
 /// The runner layer digest a cluster deploy binds for this bundle (#3260).
 ///
 /// `Some` only when `connectors.yaml` declares `runner` and the lock records
@@ -2369,5 +2395,72 @@ mod locked_runner_image_tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(CONNECTORS_FILE), "connectors: {}\n").unwrap();
         assert_eq!(locked_runner_image(dir.path()).unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod undeclared_runner_dockerfile_tests {
+    use super::*;
+
+    fn bundle(connectors: Option<&str>, dockerfile: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(body) = connectors {
+            std::fs::write(dir.path().join(CONNECTORS_FILE), body).unwrap();
+        }
+        if dockerfile {
+            std::fs::write(
+                dir.path().join(RUNNER_DOCKERFILE),
+                "ARG CURIE_RUNNER_IMAGE\nFROM ${CURIE_RUNNER_IMAGE}\n",
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn warns_when_a_runner_dockerfile_has_no_declaration() {
+        let dir = bundle(None, true);
+        let decl = load(dir.path()).unwrap();
+        let warning = undeclared_runner_dockerfile(dir.path(), &decl).expect("a warning");
+        assert!(
+            warning.contains("runner.Dockerfile is never built"),
+            "{warning}"
+        );
+        assert!(warning.contains("curie build --plugin-dir"), "{warning}");
+    }
+
+    #[test]
+    fn silent_when_the_layer_is_declared() {
+        let dir = bundle(
+            Some("connectors: {}\nrunner:\n  build:\n    context: .\n    dockerfile: runner.Dockerfile\n    platforms: [linux/amd64]\n"),
+            true,
+        );
+        let decl = load(dir.path()).unwrap();
+        assert_eq!(undeclared_runner_dockerfile(dir.path(), &decl), None);
+    }
+
+    #[test]
+    fn silent_without_a_runner_dockerfile() {
+        let dir = bundle(None, false);
+        let decl = load(dir.path()).unwrap();
+        assert_eq!(undeclared_runner_dockerfile(dir.path(), &decl), None);
+    }
+
+    /// The shipped bundles that install stdio servers declare their layer, so
+    /// `curie build` builds it and a deploy binds it (#3420).
+    #[test]
+    fn shipped_bundles_declare_their_runner_layer() {
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");
+        for name in ["dark-factory", "github-issues", "mean-tester"] {
+            let dir = examples.join(name);
+            let decl = load(&dir).unwrap_or_else(|err| panic!("{name}: {err:#}"));
+            let runner = decl
+                .runner
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: no runner"));
+            assert_eq!(runner.build.dockerfile, RUNNER_DOCKERFILE, "{name}");
+            check_runner_source(&dir, runner).unwrap_or_else(|err| panic!("{name}: {err:#}"));
+            assert_eq!(undeclared_runner_dockerfile(&dir, &decl), None, "{name}");
+        }
     }
 }

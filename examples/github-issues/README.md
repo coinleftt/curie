@@ -14,14 +14,26 @@ the sandbox at launch with `curie skill up --secret <NAME>`.
 github-issues/
   .claude-plugin/plugin.json    bundle manifest
   .mcp.json                     declares the off-the-shelf GitHub stdio server
+  connectors.yaml               declares the runner layer (`runner:`)
   runner.Dockerfile             layers that server onto the platform runner
   skills/github-issues/SKILL.md  a skill that reads and triages issues
 ```
 
 There is no server code in this bundle. `.mcp.json` points `command` at
 `mcp-server-github`, and this bundle's `runner.Dockerfile` installs the pinned
-package on the platform runner so the server starts with **no runtime network
-fetch**. The GitHub token is not in the bundle; it is forwarded by name at
+package in a layer on the platform runner so the server starts with **no
+runtime network fetch**. `connectors.yaml` declares that layer (ADR 0173); the
+platform runner does not carry the server, so the layer is what makes it
+exist. Build it before a cluster deploy:
+
+```bash
+curie build --plugin-dir examples/github-issues --registry <registry-ref>
+curie cluster deploy --plugin-dir examples/github-issues \
+  --secret GITHUB_PERSONAL_ACCESS_TOKEN
+```
+
+`curie build` records the layer's digest in `connectors.lock.yaml`, and the
+deploy refuses the bundle until that lock exists. The GitHub token is not in the bundle; it is forwarded by name at
 launch (below).
 
 ## How the secret reaches the server
@@ -43,8 +55,8 @@ its TUI, and stops the runner when you leave the chat.
 Prerequisites: a model credential in your environment
 (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`), and a GitHub PAT. A
 read-scoped (`public_repo` / `repo:read`) token is enough to list and read
-issues. `mcp-server-github` is installed by this bundle's `runner.Dockerfile`
-onto the platform runner. `curie build` and `curie skill up` still start the
+issues. `mcp-server-github` is installed by this bundle's runner layer, not by
+the platform runner. `curie skill up` still starts the
 platform image, which does not contain that binary.
 
 ```bash
