@@ -1034,7 +1034,7 @@ def test_upgrade_matrix_lists_every_shard_on_full_runs_and_one_on_prs(
 ) -> None:
     full = _list_shards(tmp_path, "true")
     shards = json.loads(full.removeprefix("shards="))
-    assert len(shards) == 14
+    assert len(shards) == 12
     assert _list_shards(tmp_path, "false") == 'shards=["s01"]\n'
 
 

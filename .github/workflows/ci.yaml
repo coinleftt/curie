@@ -2546,7 +2546,7 @@ jobs:
         run: |
           set -euo pipefail
           released_chart="$RUNNER_TEMP/curie-0.8.2.tgz"
-          curl -fsSL -o "$released_chart" \
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o "$released_chart" \
             https://github.com/curie-eng/curie/releases/download/v0.8.2/curie-0.8.2.tgz
           echo "b7fb394e29cbb3267c149aed6a9cda53570e71e338f873ed02f1902a138f37c7  $released_chart" \
             | sha256sum --check --strict
@@ -2556,7 +2556,7 @@ jobs:
         run: |
           set -euo pipefail
           released_chart_084="$RUNNER_TEMP/curie-0.8.4.tgz"
-          curl -fsSL -o "$released_chart_084" \
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o "$released_chart_084" \
             https://github.com/curie-eng/curie/releases/download/v0.8.4/curie-0.8.4.tgz
           echo "fee20ab73c05d7a888165f980fb82d25150fcba509f19218bafc4c187a9044bb  $released_chart_084" \
             | sha256sum --check --strict
@@ -2886,7 +2886,7 @@ jobs:
         run: |
           set -euo pipefail
           released_chart="$RUNNER_TEMP/curie-0.8.2.tgz"
-          curl -fsSL -o "$released_chart" \
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o "$released_chart" \
             https://github.com/curie-eng/curie/releases/download/v0.8.2/curie-0.8.2.tgz
           echo "b7fb394e29cbb3267c149aed6a9cda53570e71e338f873ed02f1902a138f37c7  $released_chart" \
             | sha256sum --check --strict
@@ -2977,7 +2977,7 @@ jobs:
           kind delete cluster --name curie-upgrade-negative 2>/dev/null || true
 
   # The upgrade matrix is sharded (issue #2733) and change-selected with
-  # released-upgrade. Unrelated CLI, docs, and UI PRs must not occupy 14 kind
+  # released-upgrade. Unrelated CLI, docs, and UI PRs must not occupy 12 kind
   # runners. The shard lister stays on every PR so coverage cannot drift.
   #
   # A pull request that selects released-upgrade runs only the smoke shard,
