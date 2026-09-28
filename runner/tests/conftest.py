@@ -9,7 +9,14 @@ own virtualenv, and must never be imported or run by this repository's pytest.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pytest
+
+# Shared helper modules (``runner_*_support``) live beside the tests; the
+# importlib import mode does not put this directory on sys.path by itself.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 @pytest.fixture(autouse=True)
@@ -26,9 +33,7 @@ def _zero_probe_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
 
     from curie_runner import mcp_tool_capability
 
-    monkeypatch.setattr(
-        mcp_tool_capability, "_PROBE_RETRY_BACKOFF_SECONDS", 0.0, raising=False
-    )
+    monkeypatch.setattr(mcp_tool_capability, "_PROBE_RETRY_BACKOFF_SECONDS", 0.0, raising=False)
 
 
 collect_ignore_glob = ["fixtures/**"]
