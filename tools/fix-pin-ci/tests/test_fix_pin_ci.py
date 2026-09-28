@@ -717,11 +717,13 @@ def test_required_workflows_reach_one_task_branch_without_widening_pushes() -> N
             assert push.get("branches") == ["main", "next"], path.name
 
 
-def _python_job(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _python_job(
+    document: dict[str, Any], job_id: str = "python"
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     jobs = document.get("jobs")
     assert isinstance(jobs, dict), "ci.yaml must declare jobs"
-    job = jobs.get("python")
-    assert isinstance(job, dict), "ci.yaml must retain the python job"
+    job = jobs.get(job_id)
+    assert isinstance(job, dict), f"ci.yaml must retain the {job_id} job"
     steps = job.get("steps")
     assert isinstance(steps, list), "the required Python job must retain steps"
     return job, [step for step in steps if isinstance(step, dict)]
@@ -773,9 +775,14 @@ def test_ci_keeps_the_required_python_status_and_keeps_the_fix_pin_gate_off_it()
         "reopened",
     }, "CI must rerun required checks on new commits, not on title or body edits"
 
-    job, steps = _python_job(document)
+    job, required_steps = _python_job(document)
     assert job.get("name") == "Python (ruff + mypy + pytest)"
-    assert "needs" not in job, "the required Python check must not be skippable"
+    # The suite runs in the python-pytest shards; the required job only waits
+    # for them to aggregate their results, and always() keeps it from skipping.
+    assert job.get("needs") == "python-pytest"
+    assert job.get("if") == "always()", "the required Python check must not be skippable"
+    shard_job, steps = _python_job(document, "python-pytest")
+    assert "needs" not in shard_job and "if" not in shard_job
 
     permissions = job.get("permissions")
     assert isinstance(permissions, dict), "the Python job must declare job level permissions"
@@ -821,17 +828,34 @@ def test_ci_keeps_the_required_python_status_and_keeps_the_fix_pin_gate_off_it()
     # xdist distribution flags change where tests run, not which tests run, so
     # they are allowed alongside reporting flags. Anything else could filter.
     extra = pytest_command[4:]
-    distribution = ["-n", "4", "--dist", "loadgroup"]
+    # The shard flag and the one rerun are also allowed: the shards partition
+    # the unfiltered collection along xdist groups (asserted in
+    # tools/e2e-ci-selection/tests/test_python_pytest_selection.py), and a rerun
+    # changes how often a failing test runs, never which tests run.
+    distribution = [
+        "-n",
+        "4",
+        "--dist",
+        "loadgroup",
+        "--ci-shard",
+        # shlex splits the matrix expression `${{ matrix.shard }}/3`
+        "${{",
+        "matrix.shard",
+        "}}/3",
+        "--reruns",
+        "1",
+    ]
     if extra[: len(distribution)] == distribution:
         extra = extra[len(distribution) :]
-    assert all(argument.startswith("--durations") for argument in extra), (
-        "the Python suite must run unfiltered: only reporting and xdist "
-        f"distribution flags may be added to `uv run pytest -q`, got {pytest_command!r}"
+    assert all(argument.startswith("--durations") or argument == "-rR" for argument in extra), (
+        "the Python suite must run unfiltered: only reporting, sharding, rerun, and "
+        f"xdist distribution flags may be added to `uv run pytest -q`, got {pytest_command!r}"
     )
     assert stack_index < migration_index < pytest_index
 
     # The half that keeps the win. Nothing about the gate may drift back into
     # the job whose length is the critical path.
+    steps = steps + required_steps
     assert not any(_is_fix_pin_gate(step) for step in steps), (
         "the fix pin gate must not run inside the Python job again"
     )
