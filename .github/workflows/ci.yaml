@@ -2077,14 +2077,15 @@ jobs:
           path: ${{ runner.temp }}/runtime-assertion-receipts
           if-no-files-found: ignore
 
-  # CHART RUNTIME REGRESSIONS, in parallel with the cluster rung. Two single
+  # CHART RUNTIME REGRESSIONS, in parallel with the cluster rung. Single
   # regression proofs that need an enforcing Calico cluster but neither the
   # curie binary nor the product images, so this job does not wait on the Rust
   # build and finishes inside the rung. It is selected by the same cluster tier
   # (every charts/ change), and `E2E required` needs it: the Langfuse readiness
-  # assertion is a registered runtime assertion (#3391), and a failure here
-  # reddens the required verdict exactly as the rung does. Each proof uses its
-  # own namespace and release, so they share the cluster.
+  # assertion and the connector readiness probe are registered runtime
+  # assertions (#3391), and a failure here reddens the required verdict exactly
+  # as the rung does. Each proof uses its own namespace, so they share the
+  # cluster.
   e2e-cluster-chart-regressions:
     name: E2E chart runtime regressions (kind, Calico)
     runs-on: ubuntu-latest
@@ -2177,6 +2178,23 @@ jobs:
             --namespace "$READINESS_NAMESPACE" \
             --release "$READINESS_RELEASE" \
             --postgres-image "$READINESS_POSTGRES_IMAGE"
+      # The connector render needs the workspace. Kept out of the assertion
+      # step so that step is only the receipt runner (#3391).
+      - name: Install uv for the connector readiness render
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: "3.13"
+      # Connector readiness (#3338). The script defaults to k8scratch; this
+      # job's kube context is kind-curie-e2e and must be passed explicitly.
+      # The namespace is this run's id so a retry does not reuse a leftover.
+      - name: Connector that never listens stays not-Ready until it binds
+        env:
+          CONNECTOR_READINESS_CONTEXT: kind-curie-e2e
+          CONNECTOR_READINESS_NAMESPACE: c3338-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          bash tools/runtime-assertion-gate/run.sh \
+            charts/curie/ci/runtime/connector-readiness-runtime.sh
       # Runner BYO egress (#2369). Render assertions prove the CIDRs land in
       # NetworkPolicy YAML; this proves a runner-labelled pod can actually
       # reach each declared peer (rustfs, sts, otel, api) and that an
