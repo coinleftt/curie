@@ -2,23 +2,14 @@
 
 Date: 2026-09-16
 
-Status: Accepted
+Status: Draft
 
 > Offered upstream from a downstream fork, where it was implemented and is
 > running. Nothing in it is tenant-specific: the transport it decides is the one
 > this repository's own AgentMail adapter needs, and it names no installation.
 >
-> **Accepted rather than Draft, and what that does and does not claim.** The
-> decision is taken and built: it runs against a real mail adapter on the fork
-> that wrote it, where an emailed `.pptx` is fetched and read end to end, and
-> the fork's own record of it, its ADR-9004, is Accepted. So "Draft" would
-> understate what is known about it.
->
-> What it does NOT claim is that this repository's reviewers have ratified it —
-> they have not seen it. Two neighbouring records, ADR-0151 and ADR-0152, landed
-> on `main` carrying Draft, so a status here is the author's account of how
-> settled a decision is and not a gate somebody has passed. Anyone who disagrees
-> with the shape should change it; it is offered, not imposed.
+> The downstream implementation is evidence for review. This repository's
+> maintainers have not accepted the decision here.
 
 ## Context
 

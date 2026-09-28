@@ -179,7 +179,7 @@ read verbatim from its `Status:` line. **Do not hand-edit it.** Run
 | 0147 | [Publication approval is a per-agent operator policy, not a platform constant](0147-publication-approval-is-a-per-agent-operator-policy.md) | Accepted |
 | 0151 | [A permission-gate card shows a bundle-authored sentence; the machine summary stays the audit record](0151-bundle-authored-human-approval-summary.md) | Draft |
 | 0152 | [Registry destinations are operator-declared, not a platform preset](0152-no-cidr-trusted-registries-preset.md) | Draft |
-| 0153 | [A channel-port turn carries its attachments, and the worker fetches them from the adapter that produced them](0153-a-channel-port-turn-carries-its-attachments.md) | Accepted |
+| 0153 | [A channel-port turn carries its attachments, and the worker fetches them from the adapter that produced them](0153-a-channel-port-turn-carries-its-attachments.md) | Draft |
 | 0154 | [A channel adapter is a principal, and its credential is scoped to what an adapter does](0154-adapter-principal-with-a-scoped-credential.md) | Superseded by [ADR-0156](0156-adapter-principal-with-a-scoped-credential.md) |
 | 0155 | [Tenant boundary and principal identity land together](0155-tenant-boundary-and-principal-identity-land-together.md) | Superseded by [ADR-0166](0166-tenant-boundary-and-principal-identity-land-together.md) |
 | 0156 | [A channel adapter is a principal, and its credential is scoped to what an adapter does](0156-adapter-principal-with-a-scoped-credential.md) | Accepted |
