@@ -122,6 +122,11 @@ class MigrationTemplates:
         self._base = base
         self._script = ScriptDirectory.from_config(alembic_config())
         self._by_revision: dict[str, str] = {}
+        self._created: list[str] = []
+        # Revisions 0022 and 0024 read CURIE_* variables at upgrade time. A
+        # template is shared by every later test, so it is built from the
+        # environment the session started with, never the building test's.
+        self._environ = dict(os.environ)
 
     def database_for(self, revision: str) -> str:
         script_rev = self._script.get_revision(revision)
@@ -140,19 +145,29 @@ class MigrationTemplates:
         name = f"curie_test_tpl_{target}_{secrets.token_hex(3)}".lower()
         template = f' TEMPLATE "{ancestor}"' if ancestor else ""
         asyncio.run(admin_execute(self._base, f'CREATE DATABASE "{name}"{template}'))
-        saved_url = os.environ["DATABASE_URL"]
-        os.environ["DATABASE_URL"] = render_url(self._base.set(database=name))
+        self._created.append(name)
+        environ = {**self._environ, "DATABASE_URL": render_url(self._base.set(database=name))}
         get_settings.cache_clear()
         try:
-            command.upgrade(alembic_config(), target)
+            with mock.patch.dict(os.environ, environ, clear=True):
+                command.upgrade(alembic_config(), target)
         finally:
-            os.environ["DATABASE_URL"] = saved_url
             get_settings.cache_clear()
+        # A clone needs the template to have no other session; closing it to
+        # connections keeps a stray one from failing every later clone.
+        asyncio.run(
+            admin_execute(
+                self._base,
+                f'ALTER DATABASE "{name}" WITH ALLOW_CONNECTIONS false',
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                f"WHERE datname = '{name}' AND pid <> pg_backend_pid()",
+            )
+        )
         self._by_revision[target] = name
         return name
 
     def drop_all(self) -> None:
-        for name in self._by_revision.values():
+        for name in self._created:
             asyncio.run(admin_execute(self._base, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
 
 
@@ -226,7 +241,8 @@ def run_script(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
             try:
                 returncode = module.main()
             except SystemExit as exit_:
-                returncode = exit_.code if isinstance(exit_.code, int) else 1
+                code = exit_.code
+                returncode = 0 if code is None else code if isinstance(code, int) else 1
     finally:
         sys.modules.pop(module_name, None)
     return subprocess.CompletedProcess(
