@@ -109,11 +109,8 @@ def pressure_redis_factory() -> Callable[[], AsyncRedis]:
             port=VALKEY_PORT,
             password=VALKEY_PW or None,
             decode_responses=False,
-            # Production keeps a 1s fail-fast budget; no test here asserts that
-            # budget, and on a loaded CI Valkey a 1s ping or scan read times out
-            # before the behavior under test runs.
-            socket_timeout=5.0,
-            socket_connect_timeout=5.0,
+            socket_timeout=1.0,
+            socket_connect_timeout=1.0,
             retry=AsyncRetry(NoBackoff(), 0),
             driver_info=None,
             maint_notifications_config=MaintNotificationsConfig(enabled=False),
