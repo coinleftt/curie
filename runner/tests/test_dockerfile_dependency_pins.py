@@ -541,6 +541,44 @@ def test_dependency_exporter_reflects_a_lock_version_bump() -> None:
     assert f"claude-agent-sdk=={expected['claude-agent-sdk']}" not in pins
 
 
+@pytest.mark.parametrize(
+    "marker_literal",
+    [
+        '""',
+        r'"\r"',
+        r'"\n"',
+        "\"sys_platform == 'win32'; python_version > '3.13'\"",
+    ],
+)
+def test_dependency_exporter_rejects_malformed_markers(
+    marker_literal: str,
+) -> None:
+    lock_text = f"""\
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[[package]]
+name = "curie-runner"
+version = "0.0.0"
+source = {{ editable = "runner" }}
+dependencies = [
+    {{ name = "conditional", marker = {marker_literal} }},
+]
+
+[[package]]
+name = "conditional"
+version = "1.0.0"
+source = {{ registry = "https://pypi.org/simple" }}
+"""
+
+    result = _run_dependency_exporter(lock_text)
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "invalid uv.lock" in result.stderr
+
+
 def test_dependency_exporter_rejects_malformed_lock_input() -> None:
     result = _run_dependency_exporter("[[package]\nname = ")
 

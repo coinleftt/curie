@@ -315,6 +315,29 @@ def test_submitting_the_dialog_resolves_with_the_typed_note(
     assert not any(b.get("type") == "actions" for b in kwargs["blocks"])
 
 
+def test_an_unrelated_404_does_not_claim_cross_release_ownership() -> None:
+    """A missing proxy route and a missing approval row are different failures."""
+
+    assert (
+        _refusal_text(ResolveOutcome(status_code=404, detail="Not Found"))
+        == "Resolving failed; try again shortly."
+    )
+
+
+def test_an_approval_record_miss_asks_for_the_owning_release() -> None:
+    """The exact API row miss is a durable misconfiguration, not a retry."""
+
+    refusal = _refusal_text(ResolveOutcome(status_code=404, detail="approval not found"))
+    folded = refusal.casefold()
+
+    assert "nothing was changed" in folded
+    assert "does not have this approval" in folded
+    assert "try again" not in folded
+    assert "disconnect" in folded
+    assert "socket mode" in folded
+    assert "do not retry from this side" in folded
+
+
 def test_modal_submit_posts_the_note_with_a_chat_principal(
     redis_client: redis.Redis, config: DispatcherConfig
 ) -> None:
