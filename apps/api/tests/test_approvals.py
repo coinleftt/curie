@@ -24,9 +24,9 @@ import httpx
 import pytest
 import redis
 import redis.asyncio as aioredis
+from _migration_support import IsolatedMigrationDb, alembic_config
 from aci_protocol import QueuedTurn
 from alembic import command
-from alembic.config import Config
 from curie_api import approval_principal, crud
 from curie_api import sweeper as sweeper_module
 from curie_api.config import get_settings
@@ -67,7 +67,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 # The migration test (18) drives alembic directly against the disposable DB the
 # conftest provisions, so it needs the same script location conftest uses.
-ALEMBIC_DIR = Path(__file__).resolve().parents[1] / "alembic"
 _TRACE_ID = int("2123456789abcdef0123456789abcdef", 16)
 _SPAN_ID = int("2123456789abcdef", 16)
 _TRACEPARENT = "00-2123456789abcdef0123456789abcdef-2123456789abcdef-01"
@@ -1252,8 +1251,8 @@ def test_create_approval_persists_gate_kind_and_granted_tool(
     assert legacy["granted_tool"] is None
 
 
-def test_backfill_classifies_existing_rows(isolated_migration_db: None) -> None:
-    """(18) The migration backfills rows at rest, then round-trips.
+def test_backfill_classifies_existing_rows(isolated_migration_db: IsolatedMigrationDb) -> None:
+    """(18) The migration backfills rows at rest.
 
     A prefixed summary is a genuine permission-gate block (the runner is the
     only writer of that reserved namespace), so it backfills to 'permission'
@@ -1266,15 +1265,14 @@ def test_backfill_classifies_existing_rows(isolated_migration_db: None) -> None:
     never disturbs the shared session DB the other tests read.
     """
 
-    cfg = Config()
-    cfg.set_main_option("script_location", str(ALEMBIC_DIR))
+    cfg = alembic_config()
 
     # Bring the fresh DB up to the full schema, then step back to BEFORE the
     # provenance migration (0015) to the state an existing deployment holds.
     # Target 0014 explicitly rather than a relative "-1": a later migration
     # (e.g. 0016) moving head would make "-1" stop short of undoing 0015, and
     # the backfill would never re-run on the seeded rows.
-    command.upgrade(cfg, "head")
+    isolated_migration_db.at("head")
     command.downgrade(cfg, "0014")
     permission_id = uuid.uuid4()
     policy_id = uuid.uuid4()
@@ -1293,13 +1291,9 @@ def test_backfill_classifies_existing_rows(isolated_migration_db: None) -> None:
     assert _read_provenance(permission_id) == ("permission", "Bash")
     assert _read_provenance(policy_id) == ("policy", None)
 
-    # And the revision round-trips cleanly rather than only migrating forward.
-    command.downgrade(cfg, "-1")
-    command.upgrade(cfg, "head")
-
 
 def test_gate_kind_check_constraint_rejects_unknown_values(
-    isolated_migration_db: None,
+    isolated_migration_db: IsolatedMigrationDb,
 ) -> None:
     """(#544) The DB-layer guard on the security-load-bearing gate_kind column.
 
@@ -1311,9 +1305,6 @@ def test_gate_kind_check_constraint_rejects_unknown_values(
     database (see ``_isolated_migration_db``) so the schema is untouched shared
     state.
     """
-
-    cfg = Config()
-    cfg.set_main_option("script_location", str(ALEMBIC_DIR))
 
     async def _insert(gate_kind: str | None) -> None:
         engine = create_async_engine(get_settings().database_url)
@@ -1341,7 +1332,7 @@ def test_gate_kind_check_constraint_rejects_unknown_values(
         finally:
             await engine.dispose()
 
-    command.upgrade(cfg, "head")
+    isolated_migration_db.at("head")
     # Accepted: the two literals plus NULL (NULL IN (...) is NULL, not
     # FALSE, so the CHECK passes -- the old-runner / pre-backfill case).
     asyncio.run(_insert("permission"))
