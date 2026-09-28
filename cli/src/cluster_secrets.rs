@@ -1523,6 +1523,16 @@ esac
             message.contains(RUNNER_B) && message.contains(RUNNER_A),
             "{message}"
         );
+        // #3423: the human presenter shows only the message, so the rebuild
+        // command must be part of it, not only of the `--json` fix.
+        let (human, _) = crate::exit::present_error(&err);
+        assert!(
+            human.contains(
+                "curie build --plugin-dir /bundles/sre-bot --registry <ref> --runner-image \
+                 ghcr.io/curie-eng/curie-runner:0.10.0"
+            ),
+            "{human}"
+        );
         assert_eq!(
             fix.as_deref(),
             Some(
@@ -1545,6 +1555,8 @@ esac
             message.contains("could not be determined") && message.contains("boom"),
             "{message}"
         );
+        // #3423: the remedy reaches human output, not only `--json`.
+        assert!(message.contains("curie cluster status"), "{message}");
     }
 
     #[test]
