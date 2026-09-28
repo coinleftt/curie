@@ -873,11 +873,13 @@ against every criterion, and ends in one pull request or a stated reason. Any
 other bundle can take its place; the platform does not require this one.
 
 The bundle reads the issue through the GitHub MCP server installed by
-`examples/dark-factory/runner.Dockerfile` on the platform runner, with its own
+`examples/dark-factory/runner.Dockerfile` in a runner layer the bundle
+declares in `connectors.yaml` (ADR-0173), with its own
 `GITHUB_PERSONAL_ACCESS_TOKEN` bound at deploy
-(`curie cluster deploy --secret GITHUB_PERSONAL_ACCESS_TOKEN`). A deploy still
-starts the platform image, which does not contain that server, until the
-bundle can declare the layer (#3216). Give it a token
+(`curie cluster deploy --secret GITHUB_PERSONAL_ACCESS_TOKEN`). The platform
+runner does not contain that server, so run
+`curie build --plugin-dir examples/dark-factory --registry <ref>` before the
+deploy; the deploy refuses the bundle until its lock records the layer. Give it a token
 limited to **Issues: Read and write**. Its `toolPolicy` allows `github/get_issue`
 and `github/add_issue_comment`, and the bundle's review gate hook allows that
 comment only once, to post unresolved findings after a failed or capped review,
@@ -1631,6 +1633,26 @@ different channel, see [Building a channel adapter](guides/building-a-channel-ad
 A chart upgrade is a **full** upgrade: anything the new chart does not render is
 deleted. For a Deployment that means a restart. For a StatefulSet it means the
 data too.
+
+### Bundles that carry their own stdio MCP servers (0.11.0)
+
+From 0.11.0 the platform runner no longer contains `mcp-server-github` or
+`slack-mcp` (#3230). The shipped `examples/dark-factory`,
+`examples/github-issues` and `examples/mean-tester` bundles now declare a
+runner layer in `connectors.yaml` that installs them. An agent already running
+one of these bundles loses its server on `curie cluster upgrade` alone, because
+the platform runner is what changes. After upgrading to 0.11.0, rebuild and
+redeploy each such agent from the updated bundle:
+
+```bash
+curie build --plugin-dir examples/dark-factory --registry <ref>
+curie cluster deploy --plugin-dir examples/dark-factory --agent <agent> ...
+```
+
+The same applies to your own bundle if it ships a `runner.Dockerfile`: declare
+`runner.build` in its `connectors.yaml`, or nothing builds it. A deploy of a
+bundle with a `runner.Dockerfile` and no `runner:` declaration prints a warning
+saying so.
 
 ### State-identity migration (Alembic revision 0037)
 
