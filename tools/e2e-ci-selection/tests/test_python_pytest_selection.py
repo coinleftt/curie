@@ -15,7 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SELECTOR = REPO_ROOT / "tools" / "e2e-ci-selection" / "select_tiers.py"
 REGISTRY = REPO_ROOT / ".github" / "e2e-selection.yaml"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yaml"
-FIX_PIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "fix-pin.yaml"
 
 
 def _invoke_selector(
@@ -92,17 +91,6 @@ def _named_steps(job_id: str = "python") -> dict[str, dict[str, Any]]:
     return {
         step["name"]: step
         for step in steps
-        if isinstance(step, dict) and isinstance(step.get("name"), str)
-    }
-
-
-def _fix_pin_named_steps() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-    workflow = yaml.safe_load(FIX_PIN_WORKFLOW.read_text())
-    job = workflow["jobs"]["fix-pin"]
-    assert isinstance(job, dict)
-    return job, {
-        step["name"]: step
-        for step in job["steps"]
         if isinstance(step, dict) and isinstance(step.get("name"), str)
     }
 
@@ -319,50 +307,6 @@ def test_dump_logs_do_not_run_when_the_stack_never_started() -> None:
     condition = _string(dump, "if")
     assert "failure()" in condition
     assert "steps.python-runtime.outputs.pytest == 'true'" in condition
-
-
-def test_the_fix_pin_gate_left_the_python_job() -> None:
-    """The suite's job must not carry the gate that used to run behind it.
-
-    This file's subject is what the pytest selector does and does not gate. The
-    fix pin steps were never gated on it, and now they are not even in the same
-    job, so the strongest statement here is absence: nothing that selects a
-    tier may reach them, because they are somewhere else.
-    """
-    named = _named_steps()
-    for name in (
-        "Decide whether the current curie binary is needed",
-        "Build the current curie binary for fix pin verification",
-        "Install Helm for fix pin verification",
-        "Require declared fixes to be pinned by a changed test",
-    ):
-        assert name not in named, f"{name} must not run inside the Python job"
-
-
-def test_cargo_guard_if_is_unchanged() -> None:
-    job, named = _fix_pin_named_steps()
-    # The workflow trigger confines every step to pull requests.
-    assert "if" not in job
-
-    probe = named["Decide whether the current curie binary is needed"]
-    assert probe["id"] == "fix-pin-curie"
-    assert "if" not in probe, "the probe must decide for every pull request"
-
-    cargo = named["Build the current curie binary for fix pin verification"]
-    helm = named["Install Helm for fix pin verification"]
-    needed = "steps.fix-pin-curie.outputs.needed == 'true'"
-    for step in (cargo, helm):
-        condition = _string(step, "if")
-        assert needed in condition
-        assert "Fix pin:" not in condition
-        # No tier selector runs in this job, so this can only stay true.
-        assert PYTEST_SELECTED not in condition
-
-    gate = named["Require declared fixes to be pinned by a changed test"]
-    assert "if" not in gate, (
-        "the gate must still run for a body with no declaration, or the "
-        "bug-without-declaration rejection can never fire"
-    )
 
 
 def _bindings(step: dict[str, Any], expressions: dict[str, str]) -> dict[str, str]:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import json
 import os
 import re
@@ -9,6 +11,8 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 import pytest
 import yaml
@@ -91,6 +95,33 @@ def _invoke_selector(
     )
     output = output_path.read_text() if output_path.exists() else ""
     return completed, output
+
+
+def _load_selector_module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("select_tiers", SELECTOR)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # Registered first: the module's dataclasses resolve their own module.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# Checks that sweep many paths call the selector's own per-path function in
+# process; one interpreter per path cost seconds per test. The CLI boundary
+# (GITHUB_OUTPUT, --push, --omit-kind, revisions) keeps its subprocess tests
+# through `_invoke_selector`.
+_SELECTOR_MODULE = _load_selector_module()
+
+
+@functools.cache
+def _loaded_registry(registry: Path) -> Any:
+    return _SELECTOR_MODULE._load_registry(registry)
+
+
+def _selects_released_upgrade(path: str, registry: Path = REGISTRY) -> bool:
+    selected = _SELECTOR_MODULE._select_path(_loaded_registry(registry), path)
+    return "released-upgrade" in selected
 
 
 def _path_needs_images(path: str) -> bool:
@@ -296,7 +327,6 @@ def _matches(path: str, prefix: str) -> bool:
 
 
 def _unselected_matrix_inputs(
-    tmp_path: Path,
     script: str,
     registry: Path = REGISTRY,
 ) -> list[str]:
@@ -322,10 +352,7 @@ def _unselected_matrix_inputs(
             problems.append(f"{reference}: neither in the checkout nor ignored")
             continue
         for path in paths:
-            completed, output = _invoke_selector(tmp_path, path, registry=registry)
-            assert completed.returncode == 0, completed.stderr
-            outputs = dict(line.split("=", maxsplit=1) for line in output.splitlines())
-            if outputs["released_upgrade"] != "true":
+            if not _selects_released_upgrade(path, registry):
                 problems.append(f"{path}: does not select released-upgrade")
     return problems
 
@@ -345,7 +372,7 @@ def test_released_upgrade_selects_every_repo_file_the_upgrade_matrix_reads(
     helmignore = (REPO_ROOT / "charts" / "curie" / ".helmignore").read_text()
     assert UPGRADE_MATRIX_DIRECTORY_INPUTS["charts/curie"] == ("charts/curie/ci",)
     assert "ci/" in helmignore.splitlines()
-    assert _unselected_matrix_inputs(tmp_path, script) == []
+    assert _unselected_matrix_inputs(script) == []
 
 
 def test_matrix_input_guard_checks_every_packaged_chart_file(tmp_path: Path) -> None:
@@ -359,7 +386,7 @@ def test_matrix_input_guard_checks_every_packaged_chart_file(tmp_path: Path) -> 
         text.replace(anchor, f"{anchor}    charts/curie/files/agent-sandbox: []\n")
     )
     assert _unselected_matrix_inputs(
-        tmp_path, 'helm package "$REPO_ROOT/charts/curie"\n', registry
+        'helm package "$REPO_ROOT/charts/curie"\n', registry
     ) == [
         "charts/curie/files/agent-sandbox/controller.yaml: does not select released-upgrade",
     ]
@@ -379,7 +406,7 @@ def test_matrix_input_guard_names_each_read_the_registry_drops(tmp_path: Path) -
     registry = tmp_path / "registry.yaml"
     registry.write_text(text)
     assert _unselected_matrix_inputs(
-        tmp_path, UPGRADE_MATRIX.read_text(), registry
+        UPGRADE_MATRIX.read_text(), registry
     ) == [f"{path}: does not select released-upgrade" for path in dropped]
 
 
@@ -415,7 +442,7 @@ def test_matrix_input_guard_classifies_each_reference(
     script: str,
     problems: list[str],
 ) -> None:
-    assert _unselected_matrix_inputs(tmp_path, script) == problems
+    assert _unselected_matrix_inputs(script) == problems
 
 
 def test_e2e_ladder_script_stays_off_released_upgrade(tmp_path: Path) -> None:
@@ -565,7 +592,7 @@ def test_released_upgrade_selects_chart_ci_scripts_its_own_jobs_run(
     } <= run_by_jobs
     for path in sorted(run_by_jobs):
         assert (REPO_ROOT / path).is_file(), path
-        assert _selector_outputs(tmp_path, path)["released_upgrade"] == "true", path
+        assert _selects_released_upgrade(path), path
 
 
 def test_every_shipped_chart_file_selects_released_upgrade(tmp_path: Path) -> None:
@@ -586,7 +613,7 @@ def test_every_shipped_chart_file_selects_released_upgrade(tmp_path: Path) -> No
     entries = {path.removeprefix(f"{CHART_ROOT}/").split("/", 1)[0] for path in shipped}
     assert {"Chart.yaml", "templates", "values.yaml"} <= entries
     for path in shipped:
-        assert _selector_outputs(tmp_path, path)["released_upgrade"] == "true", path
+        assert _selects_released_upgrade(path), path
 
 
 @pytest.mark.parametrize(
