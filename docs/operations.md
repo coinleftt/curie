@@ -851,7 +851,10 @@ deadline; the request completes only when CI is green. A failure resumes the
 same run to fix the code and push to the same pull request, for at most 3
 rounds, then the issue gets `Could not complete:` with the failing checks and
 what each round tried. No checks within 120 s of the push completes with a
-note. Checks still pending when the CI wait (by default 1200 s from the push, or the
+note only when no required check applies. A factory Python publication needs
+the selected `Python (ruff + mypy + pytest)` Actions check to run and pass;
+missing, skipped, unreadable, unrelated, or failed evidence cannot complete it.
+Checks still pending when the CI wait (by default 1200 s from the push, or the
 execution deadline if sooner) runs out end as `ci_timeout`. Set the wait with
 `api.githubFactoryCiWaitSeconds` (API env `GITHUB_FACTORY_CI_WAIT_S`, default
 1200, 1 to 10800, checked at boot) when the repository's required checks take
